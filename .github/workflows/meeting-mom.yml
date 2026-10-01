@@ -57,7 +57,7 @@ jobs:
           mkdir -p whisper.cpp/models
           curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin             https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
 
-      - name: Prepare local AI engine
+      - name: Prepare AI engine on GitHub runner
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
           ollama serve > /tmp/ollama.log 2>&1 &
