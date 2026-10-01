@@ -25,6 +25,40 @@ function todayISO() {
   return local.toISOString().slice(0,10);
 }
 
+function formatMeetingDate(value) {
+  if (!value) return "";
+  const d = new Date(value + "T00:00:00");
+  return d.toLocaleDateString("en-GB", {day:"2-digit", month:"short", year:"numeric"});
+}
+
+function cleanFilePart(value) {
+  return String(value || "").trim()
+    .replace(/[\\/:*?"<>|#%{}~&]/g, "_")
+    .replace(/\s+/g, " ")
+    .slice(0, 100);
+}
+
+function getMeetingFileBaseName() {
+  const title = cleanFilePart($("title")?.value);
+  const date = formatMeetingDate($("date")?.value) || formatMeetingDate(todayISO());
+  return (title ? title + " - " : "") + date;
+}
+
+function getMoMFileNames() {
+  const base = getMeetingFileBaseName();
+  return {
+    ai: base + " - AI_MOM.docx",
+    edited: base + " - EDITED_MOM.docx",
+    final: base + " - FINAL_MOM.docx"
+  };
+}
+
+function updateFilenamePreview() {
+  const names = getMoMFileNames();
+  const el = $("filenamePreview");
+  if (el) el.innerHTML = "MoM filename: <b>" + escapeHtml(names.final) + "</b>";
+}
+
 function initGoogle() {
   if (!window.google?.accounts?.oauth2) {
     setTimeout(initGoogle, 300);
@@ -310,6 +344,79 @@ async function stopMeeting() {
   }
 }
 
+function copyTextFrom(id) {
+  const value = $(id)?.value || "";
+  if (!value) return;
+  navigator.clipboard.writeText(value)
+    .then(()=>status("Copied to clipboard.", "success"))
+    .catch(()=>status("Copy was blocked by the browser.", "error"));
+}
+
+function toggleEditor(id, buttonId) {
+  const field = $(id), button = $(buttonId);
+  if (!field || !button) return;
+  field.readOnly = !field.readOnly;
+  button.textContent = field.readOnly ? "EDIT" : "DONE EDITING";
+  if (!field.readOnly) field.focus();
+}
+
+function listenText(id) {
+  const value = $(id)?.value || "";
+  if (!value || !("speechSynthesis" in window)) {
+    status("Text-to-speech is not available in this browser.", "error");
+    return;
+  }
+  speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(value);
+  utterance.lang = "en-IN";
+  speechSynthesis.speak(utterance);
+}
+
+function showMeetingResults(data={}) {
+  const names = getMoMFileNames();
+  $("resultsCard").classList.remove("hidden");
+  $("resultMeetingName").textContent = ($("title").value.trim() || "Meeting") + " • " + formatMeetingDate($("date").value);
+  $("aiDocName").textContent = data.aiFileName || names.ai;
+  $("editedDocName").textContent = data.editedFileName || names.edited;
+  $("finalDocName").textContent = data.finalFileName || names.final;
+  $("editSummary").value = data.summary || "";
+  $("editDecisions").value = data.decisions || "";
+  $("editActions").value = data.actions || "";
+  $("editFollowup").value = data.followup || "";
+  $("editMom").value = data.mom || "";
+  if (data.aiDownloadUrl) { $("downloadAiBtn").disabled=false; $("downloadAiBtn").onclick=()=>window.open(data.aiDownloadUrl,"_blank"); }
+  if (data.editedDownloadUrl) { $("downloadEditedBtn").disabled=false; $("downloadEditedBtn").onclick=()=>window.open(data.editedDownloadUrl,"_blank"); }
+  if (data.finalDownloadUrl) { $("downloadFinalBtn").disabled=false; $("downloadFinalBtn").onclick=()=>window.open(data.finalDownloadUrl,"_blank"); }
+  if (data.meetingFolderUrl) { $("openDriveBtn").disabled=false; $("openDriveBtn").onclick=()=>window.open(data.meetingFolderUrl,"_blank"); }
+}
+
+async function saveFinalMom() {
+  const names = getMoMFileNames();
+  const payload = {
+    action: "saveFinalMom",
+    file_name: names.final,
+    meeting_id: meetingFolders?.meeting?.id || "",
+    summary: $("editSummary").value,
+    decisions: $("editDecisions").value,
+    actions: $("editActions").value,
+    followup: $("editFollowup").value,
+    mom: $("editMom").value
+  };
+  status("Saving final MoM...", "");
+  try {
+    const response = await fetch(CONFIG.gateway, {
+      method:"POST",
+      headers:{"Content-Type":"text/plain;charset=utf-8"},
+      body:JSON.stringify(payload)
+    });
+    const result = await response.json();
+    if (!result.ok) throw new Error(result.error || "Could not save final MoM.");
+    status("Final MoM saved as " + names.final, "success");
+  } catch (err) {
+    status(err.message, "error");
+  }
+}
+
 function setupVoiceButton(buttonId, targetId) {
   const button = $(buttonId);
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -343,6 +450,19 @@ $("uploadBtn").addEventListener("click", uploadSelectedAudio);
 setupVoiceButton("titleVoice","title");
 setupVoiceButton("agendaVoice","agenda");
 $("date").value=todayISO();
+["title","date"].forEach(id => $(id)?.addEventListener("input", updateFilenamePreview));
+updateFilenamePreview();
+
+["summary","decisions","actions","followup","mom"].forEach(key => {
+  const fieldId="edit"+key.charAt(0).toUpperCase()+key.slice(1);
+  const btnId=fieldId+"Btn";
+  const copyId="copy"+key.charAt(0).toUpperCase()+key.slice(1)+"Btn";
+  const listenId="listen"+key.charAt(0).toUpperCase()+key.slice(1)+"Btn";
+  $(btnId)?.addEventListener("click",()=>toggleEditor(fieldId,btnId));
+  $(copyId)?.addEventListener("click",()=>copyTextFrom(fieldId));
+  $(listenId)?.addEventListener("click",()=>listenText(fieldId));
+});
+$("saveFinalBtn")?.addEventListener("click", saveFinalMom);
 initGoogle();
 window.addEventListener("error", function(e) {
   status("App error: " + (e.message || "JavaScript error"), "error");
