@@ -10,6 +10,8 @@ let startedAt = null;
 let timerHandle = null;
 let meetingRoot = null;
 let meetingFolders = null;
+let audioUploaded = false;
+let retryButton = null;
 
 const $ = id => document.getElementById(id);
 
@@ -59,6 +61,78 @@ function updateFilenamePreview() {
   if (el) el.innerHTML = "MoM filename: <b>" + escapeHtml(names.final) + "</b>";
 }
 
+function persistMeetingState() {
+  if (!meetingFolders?.meeting?.id) return;
+  const state = {
+    meeting: meetingFolders.meeting,
+    audio: meetingFolders.audio,
+    transcript: meetingFolders.transcript,
+    translation: meetingFolders.translation,
+    ai: meetingFolders.ai,
+    mom: meetingFolders.mom,
+    metadata: meetingFolders.metadata,
+    audioUploaded: !!audioUploaded
+  };
+  localStorage.setItem("meeting_mom_active_meeting", JSON.stringify(state));
+}
+
+function restoreMeetingState() {
+  try {
+    const saved = localStorage.getItem("meeting_mom_active_meeting");
+    if (!saved) return false;
+    const state = JSON.parse(saved);
+    if (!state?.meeting?.id || !state?.audio?.id) return false;
+    meetingFolders = state;
+    audioUploaded = !!state.audioUploaded;
+    ensureRetryButton();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function ensureRetryButton() {
+  if (retryButton || !meetingFolders?.meeting?.id) return;
+  const box = $("uploadBox");
+  if (!box) return;
+  retryButton = document.createElement("button");
+  retryButton.type = "button";
+  retryButton.className = "secondary";
+  retryButton.textContent = "RETRY AUTOMATIC PROCESSING";
+  retryButton.style.marginTop = "10px";
+  retryButton.addEventListener("click", retryProcessing);
+  box.appendChild(retryButton);
+}
+
+async function retryProcessing() {
+  if (!meetingFolders?.meeting?.id || !meetingFolders?.audio?.id) {
+    status("The saved meeting workspace could not be recovered.", "error");
+    return;
+  }
+  if (!audioUploaded) {
+    status("This meeting has no confirmed uploaded audio yet.", "error");
+    return;
+  }
+  try {
+    ensureRetryButton();
+    if (retryButton) {
+      retryButton.disabled = true;
+      retryButton.textContent = "STARTING PROCESSING...";
+    }
+    status("Retrying automatic processing for the existing Drive audio...", "");
+    await notifyProcessingStarted();
+    if (retryButton) retryButton.classList.add("hidden");
+    if ($("uploadText")) $("uploadText").textContent = "Processing started automatically.";
+    status("Processing started automatically. The existing audio was not uploaded again.", "success");
+  } catch (err) {
+    if (retryButton) {
+      retryButton.disabled = false;
+      retryButton.textContent = "RETRY AUTOMATIC PROCESSING";
+    }
+    status(err.message, "error");
+  }
+}
+
 function initGoogle() {
   if (!window.google?.accounts?.oauth2) {
     setTimeout(initGoogle, 300);
@@ -81,6 +155,7 @@ function initGoogle() {
       $("meetingCard").classList.remove("hidden");
       $("date").value = $("date").value || todayISO();
       try {
+        restoreMeetingState();
         await ensureAppDriveRoot();
         status("Google Drive connected. Ready.", "success");
       } catch (err) {
@@ -172,6 +247,8 @@ async function createMeetingWorkspace() {
   const metaFile = await meta.json();
 
   meetingFolders = {meeting:meetingFolder,audio:folders.AUDIO,transcript:folders.TRANSCRIPT,translation:folders.TRANSLATION,ai:folders.AI,mom:folders.MOM,metadata:metaFile};
+  audioUploaded = false;
+  persistMeetingState();
   await uploadTextToFile(metaFile.id, JSON.stringify(metadata,null,2), "application/json");
   return meetingFolders;
 }
@@ -236,6 +313,9 @@ async function uploadAudio(file) {
       const uploaded = await response.json();
       $("uploadProgress").style.width = "100%";
       $("uploadText").textContent = "Audio uploaded to AUDIO folder.";
+      audioUploaded = true;
+      persistMeetingState();
+      ensureRetryButton();
       status("Meeting audio uploaded successfully.", "success");
       return uploaded;
     } else {
@@ -323,9 +403,17 @@ async function uploadSelectedAudio() {
     await uploadAudio(file);
     $("uploadText").textContent = "Audio uploaded. Starting automatic processing...";
     status("Audio uploaded. Starting automatic processing...", "");
-    const trigger = await notifyProcessingStarted();
-    $("uploadText").textContent = "Processing started automatically.";
-    status("Processing started automatically. You do not need to run GitHub Actions.", "success");
+    try {
+      await notifyProcessingStarted();
+      $("uploadText").textContent = "Processing started automatically.";
+      ensureRetryButton();
+      if (retryButton) retryButton.classList.add("hidden");
+      status("Processing started automatically. You do not need to run GitHub Actions.", "success");
+    } catch (triggerErr) {
+      ensureRetryButton();
+      status(triggerErr.message + " Use RETRY AUTOMATIC PROCESSING after correcting the gateway.", "error");
+      if (retryButton) retryButton.classList.remove("hidden");
+    }
   } catch (err) {
     status(err.message, "error");
   }
@@ -452,6 +540,7 @@ setupVoiceButton("agendaVoice","agenda");
 $("date").value=todayISO();
 ["title","date"].forEach(id => $(id)?.addEventListener("input", updateFilenamePreview));
 updateFilenamePreview();
+restoreMeetingState();
 
 ["summary","decisions","actions","followup","mom"].forEach(key => {
   const fieldId="edit"+key.charAt(0).toUpperCase()+key.slice(1);
