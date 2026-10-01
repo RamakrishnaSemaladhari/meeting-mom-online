@@ -61,7 +61,7 @@ function showProcessingStartedUI() {
   showProcessingUI("upload", 10, "Calculating…", "Calculating…");
 }
 
-function showRecoveredProcessingUI() {
+function showRecoveredProcessingUI(message) {
   const card = $("processingCard");
   if (!card) return;
   card.classList.remove("hidden");
@@ -73,10 +73,10 @@ function showRecoveredProcessingUI() {
     el.classList.remove("done","active");
     el.classList.toggle("active", name === "checking");
   });
-  $("processingStageText").textContent = "Existing audio confirmed. It will NOT be uploaded again."; 
-  $("processingStageEta").textContent = "Stage remaining: Checking previous processing status…";
+  $("processingStageText").textContent = "Existing audio confirmed. No new upload is required.";
+  $("processingStageEta").textContent = "Stage remaining: Checking processing status…";
   $("processingTotalEta").textContent = "Total estimated remaining: Calculating…";
-  showProcessingSummaryHint("Existing meeting found. Checking what has already been completed.");
+  showProcessingSummaryHint(message || "Existing meeting found. Checking what has already been completed.");
 }
 
 function showProcessingSummaryHint(text) {
@@ -264,10 +264,20 @@ function restoreMeetingState() {
     if (box) {
       box.classList.remove("hidden");
       $("uploadText").textContent = audioUploaded
-        ? "Previous meeting audio is available. You can retry processing."
+        ? "Existing meeting audio is available."
         : "Previous meeting workspace restored.";
     }
-    ensureRetryButton();
+    const existingJob = backgroundProcessing.find(x => x.id === meetingFolders.meeting.id);
+    if (existingJob && existingJob.stage !== "failed" && existingJob.stage !== "complete") {
+      showRecoveredProcessingUI("Processing is already in progress for this meeting. You do not need to retry it.");
+      if (retryButton) retryButton.classList.add("hidden");
+      setTimeout(function(){ if (existingJob.runId) monitorWorkflowRun(existingJob); }, 0);
+    } else if (existingJob && existingJob.stage === "failed") {
+      ensureRetryButton();
+      if (retryButton) retryButton.classList.remove("hidden");
+    } else {
+      ensureRetryButton();
+    }
     return true;
   } catch (_) {
     return false;
@@ -279,8 +289,15 @@ function ensureRetryButton() {
   const box = $("uploadBox");
   if (!box) return;
   box.classList.remove("hidden");
+  const existingJob = backgroundProcessing.find(x => x.id === meetingFolders.meeting.id);
+  if (existingJob && existingJob.stage !== "failed" && existingJob.stage !== "complete") {
+    if (retryButton) retryButton.classList.add("hidden");
+    return;
+  }
   if (retryButton) {
     retryButton.classList.remove("hidden");
+    retryButton.disabled = false;
+    retryButton.textContent = "RETRY PROCESSING";
     return;
   }
   retryButton = document.createElement("button");
@@ -307,13 +324,12 @@ async function retryProcessing() {
       retryButton.disabled = true;
       retryButton.textContent = "STARTING PROCESSING...";
     }
-    showRecoveredProcessingUI();
-    status("Existing audio confirmed. It will NOT be uploaded again. Checking previous processing status...", "");
+    showRecoveredProcessingUI("Existing audio confirmed. Starting processing without uploading it again.");
+    status("Existing audio confirmed. Starting processing...", "");
     await notifyProcessingStarted();
     if (retryButton) retryButton.classList.add("hidden");
-    if ($("uploadText")) $("uploadText").textContent = "Your meeting is now being processed.";
-      showRecoveredProcessingUI();
-    status("Your meeting is now being processed. The existing audio was not uploaded again.", "success");
+    if ($("uploadText")) $("uploadText").textContent = "Processing has started. Existing audio will not be uploaded again.";
+    showRecoveredProcessingUI("Processing has started. Existing audio will not be uploaded again.");
   } catch (err) {
     if (retryButton) {
       retryButton.disabled = false;
@@ -349,13 +365,26 @@ function initGoogle() {
         const restored = restoreMeetingState();
         await ensureAppDriveRoot();
         if (restored) {
-          status("Google Drive connected. Previous meeting restored.", "success");
+          const existingJob = meetingFolders?.meeting?.id
+            ? backgroundProcessing.find(x => x.id === meetingFolders.meeting.id)
+            : null;
+          if (existingJob && existingJob.stage !== "failed" && existingJob.stage !== "complete") {
+            showRecoveredProcessingUI("Processing is already in progress for this meeting. No retry is required.");
+            if (existingJob.runId) monitorWorkflowRun(existingJob);
+            status("Google Drive connected. Processing is already in progress.", "success");
+          } else {
+            status("Google Drive connected. Previous meeting restored.", "success");
+          }
         } else {
           status("Google Drive connected. Ready.", "success");
           ensureRecoveryButton();
         }
       } catch (err) {
-        status(err.message, "error");
+        if (restored) {
+          status("Google Drive connection check is temporarily unavailable. Existing processing status is shown below.", "error");
+        } else {
+          status(err.message, "error");
+        }
       }
     }
   });
@@ -879,6 +908,9 @@ async function notifyProcessingStarted(snapshot) {
   const data = await response.json();
   if (!data.ok) throw new Error(data.error || "Processing could not be started.");
   const item = addBackgroundProcessing(snapshot,"Processing request sent",{stage:"checking",percent:5});
+  if (retryButton) retryButton.classList.add("hidden");
+  if ($("uploadText")) $("uploadText").textContent = "Processing started. Existing audio will not be uploaded again.";
+  showRecoveredProcessingUI("Processing request sent. Waiting for GitHub Actions to begin.");
   setTimeout(function(){ findAndMonitorLatestRun(item,requestStarted); },2500);
   return data;
 }
@@ -921,10 +953,24 @@ async function monitorWorkflowRun(item) {
       if (step && step.conclusion==="success") current=st;
     }
     if (job && (job.conclusion==="failure" || job.conclusion==="cancelled")) {
-      updateBackgroundProcessing(item.id,{stage:"failed",statusText:"Processing failed"}); return;
+      updateBackgroundProcessing(item.id,{stage:"failed",statusText:"Processing failed"});
+      if (meetingFolders?.meeting?.id === item.id) {
+        ensureRetryButton();
+        if (retryButton) {
+          retryButton.classList.remove("hidden");
+          retryButton.disabled = false;
+          retryButton.textContent = "RETRY PROCESSING";
+        }
+        if ($("uploadText")) $("uploadText").textContent = "Processing failed. The existing audio is still available. Retry only if you want to run it again.";
+      }
+      return;
     }
     if (job && job.status==="completed" && job.conclusion==="success") {
       updateBackgroundProcessing(item.id,{stage:"complete",percent:100,statusText:"Results ready"});
+      if (meetingFolders?.meeting?.id === item.id) {
+        if (retryButton) retryButton.classList.add("hidden");
+        if ($("uploadText")) $("uploadText").textContent = "Processing complete. Existing audio was not uploaded again.";
+      }
       await loadMeetingResults(item); return;
     }
     updateBackgroundProcessing(item.id,{stage:current.key,percent:current.pct,statusText:current.label});
