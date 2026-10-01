@@ -1,5 +1,5 @@
 const CONFIG = {
-  clientId: "REPLACE_WITH_GOOGLE_WEB_CLIENT_ID",
+  clientId: "143751867061-aq2n18bdepa6s23d6mrpufprtd7p87v7.apps.googleusercontent.com",
   driveScope: "https://www.googleapis.com/auth/drive.file"
 };
 
