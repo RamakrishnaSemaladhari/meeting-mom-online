@@ -47,7 +47,7 @@ def download_file(service, file_id, destination):
             _, done = downloader.next_chunk()
 
 def upload_bytes(service, parent_id, name, data, mime):
-    media = MediaFileUpload(data, mimetype=mime, resumable=True)
+    media = MediaFileUpload(str(data), mimetype=mime, resumable=True)
     meta = {"name": name, "parents": [parent_id]}
     return service.files().create(body=meta, media_body=media, fields="id,name,webViewLink").execute()
 
@@ -65,11 +65,11 @@ def run(cmd, cwd=None):
 
 def whisper_json(audio_wav, output_base, translate=False):
     cmd = [
-        str(WHISPER), "-m", f"models/{MODEL}", "-f", str(audio_wav),
+        str(WHISPER), "-m", f"whisper.cpp/models/{MODEL}", "-f", str(audio_wav),
         "-l", "auto", "-ojf", "-otxt", "-of", str(output_base), "-t", "4"
     ]
     if translate:
-        cmd.insert(6, "-tr")
+        cmd.append("-tr")
     run(cmd)
     json_path = Path(str(output_base) + ".json")
     txt_path = Path(str(output_base) + ".txt")
@@ -246,7 +246,7 @@ def stage_translation(service, translation_folder_id, paths):
 def stage_ai(service, meeting_folder, ai_folder_id, paths):
     metadata = metadata_from_drive(service, meeting_folder)
     data = json.loads(paths["transcript_json"].read_text(encoding="utf-8"))
-    log("Running local AI understanding and evidence extraction...")
+    log("Running AI understanding and evidence extraction on the GitHub Actions runner...")
     evidence = ollama_json(data, metadata)
     paths["evidence"].write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
     upload_text(service, ai_folder_id, "AI Evidence.json", json.dumps(evidence, ensure_ascii=False, indent=2), "application/json")
