@@ -937,6 +937,32 @@ async function monitorWorkflowRun(item) {
     if (!r.ok) throw new Error("Workflow status unavailable.");
     const data=await r.json();
     const job=(data.jobs||[])[0];
+
+    // Older test runs used a bootstrap-only job. They must never be treated
+    // as successful meeting processing.
+    if (job && job.name === "bootstrap") {
+      updateBackgroundProcessing(item.id,{
+        stage:"failed",
+        statusText:"Previous test run did not process the meeting audio."
+      });
+      if (meetingFolders?.meeting?.id === item.id) {
+        ensureRetryButton();
+        if (retryButton) {
+          retryButton.classList.remove("hidden");
+          retryButton.disabled = false;
+          retryButton.textContent = "START PROCESSING";
+        }
+        if ($("uploadText")) {
+          $("uploadText").textContent =
+            "Audio is already stored. The earlier test run was only a connectivity/bootstrap test.";
+        }
+        showRecoveredProcessingUI(
+          "Audio is ready. The earlier GitHub run was a test only; actual processing has not started."
+        );
+      }
+      return;
+    }
+
     const steps=job && job.steps ? job.steps : [];
     const stages=[
       {key:"checking",name:"Validate meeting request",pct:10,label:"Checking meeting and processor access"},
