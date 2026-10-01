@@ -92,15 +92,56 @@ def timestamped_segments(data):
             out.append({"start": round(float(start or 0), 2), "end": round(float(end or 0), 2), "text": text})
     return out
 
-def ollama_json(transcript, metadata):
-    model = os.environ.get("AI_MODEL", "qwen2.5:1.5b-instruct-q3_K_L")
-    segments = timestamped_segments(transcript)
-    evidence_text = "\n".join(
-        f"[{x['start']:.2f}-{x['end']:.2f}] {x['text']}" for x in segments
+def ollama_request(model, prompt):
+    import urllib.request
+    body = json.dumps({
+        "model": model,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.1},
+        "messages": [
+            {"role":"system","content":"Return strict JSON only. No markdown and no commentary."},
+            {"role":"user","content":prompt}
+        ]
+    }).encode()
+    req = urllib.request.Request(
+        "http://127.0.0.1:11434/api/chat", data=body,
+        headers={"Content-Type":"application/json"}
     )
-    if len(evidence_text) > 50000:
-        evidence_text = evidence_text[:50000] + "\n[TRANSCRIPT TRUNCATED FOR AI CONTEXT]"
-    prompt = f"""
+    with urllib.request.urlopen(req, timeout=900) as resp:
+        result = json.loads(resp.read().decode())
+    content = result.get("message", {}).get("content", "")
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        repair_prompt = (
+            "Convert the following model output into valid JSON using exactly these keys: "
+            "summary, discussion_points, decisions, action_items, commitments, open_questions, "
+            "next_meeting, review_flags. Preserve the factual content and do not invent anything. "
+            "Return JSON only.\n\nMODEL OUTPUT:\n" + content
+        )
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                "http://127.0.0.1:11434/api/chat",
+                data=json.dumps({
+                    "model": model,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0},
+                    "messages": [
+                        {"role":"system","content":"Return strict JSON only."},
+                        {"role":"user","content":repair_prompt}
+                    ]
+                }).encode(),
+                headers={"Content-Type":"application/json"}
+            ),
+            timeout=900
+        ) as resp:
+            repaired = json.loads(resp.read().decode())
+        return json.loads(repaired.get("message", {}).get("content", "{}"))
+
+def evidence_prompt(metadata, evidence_text):
+    return f"""
 You are the evidence-first meeting understanding engine.
 
 Meeting metadata:
@@ -121,29 +162,77 @@ Rules:
 - Every decision and action_item must contain timestamp and evidence copied/paraphrased from the transcript.
 - Participant metadata must NOT be used as proof of speaker identity.
 - Conflicts or ambiguity must go into review_flags.
+- Preserve explicit commitments and follow-up items.
 - Use concise strings/arrays.
 - action_items objects: action, owner, deadline, timestamp, evidence.
 - decisions objects: decision, timestamp, evidence.
+- commitments objects: commitment, owner, deadline, timestamp, evidence.
+- next_meeting should contain only explicitly stated next-meeting information.
 """
-    import urllib.request
-    body = json.dumps({
-        "model": model,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1},
-        "messages": [
-            {"role":"system","content":"Return strict JSON only."},
-            {"role":"user","content":prompt}
-        ]
-    }).encode()
-    req = urllib.request.Request(
-        "http://127.0.0.1:11434/api/chat", data=body,
-        headers={"Content-Type":"application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=900) as resp:
-        result = json.loads(resp.read().decode())
-    content = result.get("message", {}).get("content", "")
-    return json.loads(content)
+
+def ollama_json(transcript, metadata):
+    model = os.environ.get("AI_MODEL", "qwen2.5:1.5b-instruct-q3_K_L")
+    segments = timestamped_segments(transcript)
+    if not segments:
+        raise RuntimeError("Whisper produced no timestamped transcript segments.")
+
+    lines = [
+        f"[{x['start']:.2f}-{x['end']:.2f}] {x['text']}"
+        for x in segments
+    ]
+    full_text = "\n".join(lines)
+
+    # Keep individual AI requests comfortably below the model context limit.
+    chunk_size = 12000
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        if current and current_len + len(line) + 1 > chunk_size:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+
+    partials = []
+    for index, chunk in enumerate(chunks, start=1):
+        log(f"AI evidence pass {index}/{len(chunks)}...")
+        partials.append(ollama_request(model, evidence_prompt(metadata, chunk)))
+
+    if len(partials) == 1:
+        return partials[0]
+
+    # Consolidate chunk-level evidence. The consolidation input is much smaller
+    # than the original transcript because it contains extracted evidence only.
+    consolidation = f"""
+You are consolidating evidence extracted from {len(partials)} transcript sections of one meeting.
+
+Meeting metadata:
+{json.dumps(metadata, ensure_ascii=False, indent=2)}
+
+Section evidence:
+{json.dumps(partials, ensure_ascii=False, indent=2)}
+
+Return ONLY valid JSON with exactly these keys:
+summary, discussion_points, decisions, action_items, commitments, open_questions, next_meeting, review_flags
+
+Rules:
+- Combine overlapping items without losing explicit evidence.
+- Never invent or strengthen a fact.
+- Preserve timestamps and evidence for every decision/action/commitment.
+- Suggestion/possibility is NOT a decision.
+- A discussed date is NOT a deadline unless explicitly committed.
+- Missing owner -> "Not explicitly assigned".
+- Missing deadline -> "Not explicitly stated".
+- Participant metadata is never proof of speaker identity.
+- Preserve conflicts and uncertainty in review_flags.
+"""
+    log("AI evidence consolidation pass...")
+    return ollama_request(model, consolidation)
+
 
 def build_mom_doc(metadata, evidence):
     doc = Document()
@@ -176,9 +265,24 @@ def build_mom_doc(metadata, evidence):
             f"Timestamp: {x.get('timestamp','')} | Evidence: {x.get('evidence','')}",
             style="List Bullet"
         )
+    doc.add_heading("Commitments", level=1)
+    for x in evidence.get("commitments", []):
+        doc.add_paragraph(
+            f"{x.get('commitment','')} | Owner: {x.get('owner','Not explicitly assigned')} | "
+            f"Deadline: {x.get('deadline','Not explicitly stated')} | Timestamp: {x.get('timestamp','')} | "
+            f"Evidence: {x.get('evidence','')}",
+            style="List Bullet"
+        )
     doc.add_heading("Pending Follow-up", level=1)
     for x in evidence.get("open_questions", []):
         doc.add_paragraph(str(x), style="List Bullet")
+    doc.add_heading("Next Meeting", level=1)
+    next_meeting = evidence.get("next_meeting")
+    if isinstance(next_meeting, list):
+        for x in next_meeting:
+            doc.add_paragraph(str(x), style="List Bullet")
+    elif next_meeting:
+        doc.add_paragraph(str(next_meeting))
     doc.add_heading("Review Flags", level=1)
     for x in evidence.get("review_flags", []):
         doc.add_paragraph(str(x), style="List Bullet")
