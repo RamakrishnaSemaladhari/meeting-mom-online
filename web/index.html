@@ -46,6 +46,8 @@
 .stage.active{color:#111827;font-weight:700}.stage.active .stage-dot{background:#111827}
 .stage.done{color:#065f46}.stage.done .stage-dot{background:#10b981}
 .time-row{display:flex;justify-content:space-between;font-size:12px;color:#6b7280;margin-top:8px}
+.processing-current{margin-top:10px;font-size:14px}.processing-label{font-weight:700}
+.eta-box{margin-top:10px;padding:10px 12px;border-radius:12px;background:#fff;border:1px solid #e5e7eb;font-size:13px;line-height:1.7;font-weight:600}
 .processing-note{margin-top:12px;font-size:13px;color:#4b5563}
 .live-summary{margin-top:14px;padding:14px;border-radius:14px;background:#fff;border:1px solid #e5e7eb}
 .live-summary strong{display:block;margin-bottom:5px}
@@ -55,7 +57,7 @@
 <main>
   <div class="card">
     <h1>Meeting MoM</h1>
-    <div class="muted">Record / Upload → Drive → AI → Minutes of Meeting</div>
+    <div class="muted">Record / Upload → Understand → Minutes</div>
     <div id="status" class="status">Ready to connect Google Drive.</div>
     <button id="connectBtn" class="primary">Continue with Google</button>
   </div>
@@ -104,11 +106,12 @@
         <div class="stage" data-stage="mom"><span class="stage-dot"></span>MoM preparation & validation</div>
         <div class="stage" data-stage="complete"><span class="stage-dot"></span>Results ready</div>
       </div>
-      <div class="time-row">
-        <span id="processingStageText">Waiting for processor...</span>
-        <span id="processingEta">Time remaining: —</span>
+      <div class="processing-current"><span class="processing-label">Currently:</span> <span id="processingStageText">Preparing your meeting...</span></div>
+      <div class="eta-box">
+        <div id="processingStageEta">Stage remaining: Calculating…</div>
+        <div id="processingTotalEta">Total estimated remaining: Calculating…</div>
       </div>
-      <div class="processing-note">Almost ready — your summary, decisions, action items and full MoM will appear below.</div>
+      <div class="processing-note">Almost ready — you will see your summary here below.</div>
       <div class="live-summary"><strong>AI Understanding Summary</strong><span id="processingSummaryHint">The summary will appear here when AI processing is complete.</span></div>
     </div>
 
@@ -117,7 +120,7 @@
       <div class="progress"><div id="uploadProgress"></div></div>
     </div>
 
-    <div class="status small">Audio files are uploaded to the meeting's <b>AUDIO</b> folder. Voice-to-text for fields is optional and browser-dependent; typing remains the primary input.</div>
+    <div class="status small">Your recording stays with this meeting. Voice-to-text for fields is optional; typing remains available.</div>
   </div>
 
   <div id="resultsCard" class="card hidden">
@@ -208,6 +211,6 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>
