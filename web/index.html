@@ -24,6 +24,17 @@
     .progress{height:10px;background:#e5e7eb;border-radius:99px;overflow:hidden;margin-top:10px}.progress>div{height:100%;width:0;background:#111827;transition:width .2s}
     .filebox{border:2px dashed #d1d5db;border-radius:16px;padding:18px;text-align:center;margin-top:10px}
     .hint{font-size:12px;color:#6b7280;margin-top:6px}
+.filename-preview{margin-top:10px;padding:10px 12px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb;font-size:13px;color:#374151}
+.results-section{margin-top:14px;padding-top:14px;border-top:1px solid #e5e7eb}
+.results-title{font-size:18px;font-weight:800;margin:0 0 8px}
+.results-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.results-actions button{margin-top:0}
+.editor{width:100%;min-height:120px;padding:13px;border:1px solid #d1d5db;border-radius:12px;font:inherit;line-height:1.5;background:#fff}
+.doc-row{padding:12px;border:1px solid #e5e7eb;border-radius:12px;margin-top:8px}
+.doc-name{font-size:13px;font-weight:700;word-break:break-word}
+.doc-actions{display:flex;gap:8px;margin-top:8px}
+.doc-actions button{margin-top:0}
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#ecfdf5;color:#065f46;font-size:12px;font-weight:700}
   </style>
 </head>
 <body>
@@ -38,6 +49,7 @@
   <div id="meetingCard" class="card hidden">
     <label for="title">Meeting title</label>
     <div class="row"><input id="title" placeholder="e.g. Weekly Sales Review"><button id="titleVoice" class="secondary mini" type="button">🎤</button></div>
+    <div id="filenamePreview" class="filename-preview">MoM filename: <b>—</b></div>
 
     <div class="grid">
       <div class="field"><label for="date">Meeting date</label><input id="date" type="date"></div>
@@ -71,8 +83,95 @@
 
     <div class="status small">Audio files are uploaded to the meeting's <b>AUDIO</b> folder. Voice-to-text for fields is optional and browser-dependent; typing remains the primary input.</div>
   </div>
+
+  <div id="resultsCard" class="card hidden">
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:1">
+        <div class="results-title">Meeting Results</div>
+        <div id="resultMeetingName" class="muted"></div>
+      </div>
+      <span id="resultVersion" class="badge">FINAL</span>
+    </div>
+
+    <div class="results-section">
+      <label>AI Understanding / Executive Summary</label>
+      <textarea id="editSummary" class="editor" readonly></textarea>
+      <div class="results-actions">
+        <button id="editSummaryBtn" class="secondary" type="button">EDIT</button>
+        <button id="copySummaryBtn" class="secondary" type="button">COPY</button>
+      </div>
+      <button id="listenSummaryBtn" class="secondary" type="button">🔊 LISTEN</button>
+    </div>
+
+    <div class="results-section">
+      <label>Decisions</label>
+      <textarea id="editDecisions" class="editor" readonly></textarea>
+      <div class="results-actions">
+        <button id="editDecisionsBtn" class="secondary" type="button">EDIT</button>
+        <button id="copyDecisionsBtn" class="secondary" type="button">COPY</button>
+      </div>
+      <button id="listenDecisionsBtn" class="secondary" type="button">🔊 LISTEN</button>
+    </div>
+
+    <div class="results-section">
+      <label>Action Items</label>
+      <textarea id="editActions" class="editor" readonly></textarea>
+      <div class="results-actions">
+        <button id="editActionsBtn" class="secondary" type="button">EDIT</button>
+        <button id="copyActionsBtn" class="secondary" type="button">COPY</button>
+      </div>
+      <button id="listenActionsBtn" class="secondary" type="button">🔊 LISTEN</button>
+    </div>
+
+    <div class="results-section">
+      <label>Pending Follow-up</label>
+      <textarea id="editFollowup" class="editor" readonly></textarea>
+      <div class="results-actions">
+        <button id="editFollowupBtn" class="secondary" type="button">EDIT</button>
+        <button id="copyFollowupBtn" class="secondary" type="button">COPY</button>
+      </div>
+      <button id="listenFollowupBtn" class="secondary" type="button">🔊 LISTEN</button>
+    </div>
+
+    <div class="results-section">
+      <label>Full Minutes of Meeting</label>
+      <textarea id="editMom" class="editor" readonly style="min-height:280px"></textarea>
+      <div class="results-actions">
+        <button id="editMomBtn" class="secondary" type="button">EDIT</button>
+        <button id="copyMomBtn" class="secondary" type="button">COPY</button>
+      </div>
+      <button id="listenMomBtn" class="secondary" type="button">🔊 LISTEN</button>
+      <button id="saveFinalBtn" class="primary" type="button">SAVE FINAL MOM</button>
+    </div>
+
+    <div class="results-section">
+      <label>MoM Documents</label>
+      <div id="documentList">
+        <div class="doc-row">
+          <div id="aiDocName" class="doc-name">AI_MOM.docx</div>
+          <div class="doc-actions">
+            <button id="downloadAiBtn" class="secondary mini" type="button" disabled>DOWNLOAD</button>
+          </div>
+        </div>
+        <div class="doc-row">
+          <div id="editedDocName" class="doc-name">EDITED_MOM.docx</div>
+          <div class="doc-actions">
+            <button id="downloadEditedBtn" class="secondary mini" type="button" disabled>DOWNLOAD</button>
+          </div>
+        </div>
+        <div class="doc-row">
+          <div id="finalDocName" class="doc-name">FINAL_MOM.docx</div>
+          <div class="doc-actions">
+            <button id="downloadFinalBtn" class="secondary mini" type="button" disabled>DOWNLOAD</button>
+          </div>
+        </div>
+      </div>
+      <button id="openDriveBtn" class="secondary" type="button" disabled>📁 OPEN MEETING FOLDER IN GOOGLE DRIVE</button>
+    </div>
+  </div>
+  </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=6"></script>
+<script src="app.js?v=7"></script>
 </body>
 </html>
