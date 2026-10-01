@@ -87,7 +87,6 @@ jobs:
       - name: AI understanding and evidence extraction
         env:
           AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
-        env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
@@ -97,7 +96,6 @@ jobs:
       - name: MoM preparation and validation
         env:
           AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
-        env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
