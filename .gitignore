@@ -1,0 +1,23 @@
+# Meeting data
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+meeting_metadata.json
+transcript*
+translation*
+mom*
+AI/
+AUDIO/
+TRANSCRIPT/
+TRANSLATION/
+
+# Local secrets
+.env
+*.token
+credentials.json
+token.json
+service-account*.json
