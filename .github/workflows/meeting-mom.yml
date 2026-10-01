@@ -13,7 +13,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Privacy boundary check
         run: python processor/scripts/privacy_check.py
+
+      - name: Receive meeting job
+        env:
+          MEETING_ID: ${{ github.event.client_payload.meeting_id }}
+          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
+          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
+        run: |
+          echo "Meeting ID: $MEETING_ID"
+          echo "Audio folder: $AUDIO_FOLDER_ID"
+          echo "Meeting folder: $MEETING_FOLDER_ID"
+          echo "Automatic processing trigger received."
+
       - name: Status
-        run: echo "Meeting MoM Online workflow is configured."
+        run: echo "Meeting MoM processing pipeline has been triggered automatically."
