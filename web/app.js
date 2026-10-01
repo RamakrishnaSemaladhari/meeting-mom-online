@@ -930,7 +930,7 @@ async function notifyProcessingStarted(snapshot) {
   if (!snapshot || !snapshot.meeting || !snapshot.audio) throw new Error("Meeting workspace information is missing.");
   const requestStarted = new Date().toISOString();
   const response = await fetch(CONFIG.gateway, {
-    method:"POST", headers:{"Content-Type":"application/json"},
+    method:"POST", headers:{"Content-Type":"text/plain;charset=UTF-8"},
     body:JSON.stringify({action:"triggerProcessing", meeting_id:snapshot.meeting.id, meeting_folder_id:snapshot.meeting.id, audio_folder_id:snapshot.audio.id, metadata_file_id:snapshot.metadata ? snapshot.metadata.id : ""})
   });
   if (!response.ok) throw new Error("Processing gateway failed ("+response.status+").");
