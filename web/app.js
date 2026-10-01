@@ -32,6 +32,9 @@ function initGoogle() {
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CONFIG.clientId,
     scope: CONFIG.driveScope,
+    error_callback: (error) => {
+      status("Google authorization error: " + (error?.type || error?.message || "unknown error"), "error");
+    },
     callback: async (response) => {
       if (response.error) {
         status("Google authorization failed: " + response.error, "error");
@@ -53,11 +56,16 @@ function initGoogle() {
 }
 
 async function connectGoogle() {
+  status("Opening Google authorization...", "");
   if (!tokenClient) {
-    status("Google authorization is still loading. Please try again.", "error");
+    status("Google authorization library is still loading. Please wait 2 seconds and try again.", "error");
     return;
   }
-  tokenClient.requestAccessToken({prompt:"consent"});
+  try {
+    tokenClient.requestAccessToken({prompt:"select_account"});
+  } catch (err) {
+    status("Google authorization could not start: " + err.message, "error");
+  }
 }
 
 async function driveRequest(url, options={}) {
@@ -309,3 +317,9 @@ setupVoiceButton("titleVoice","title");
 setupVoiceButton("agendaVoice","agenda");
 $("date").value=todayISO();
 initGoogle();
+window.addEventListener("error", function(e) {
+  status("App error: " + (e.message || "JavaScript error"), "error");
+});
+window.addEventListener("unhandledrejection", function(e) {
+  status("App error: " + (e.reason?.message || e.reason || "Promise error"), "error");
+});
