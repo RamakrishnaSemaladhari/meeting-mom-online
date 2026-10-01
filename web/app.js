@@ -18,6 +18,7 @@ let mediaStream = null;
 let recordedChunks = [];
 let isRecording = false;
 let pendingProcessingMeeting = null;
+let backgroundProcessing = JSON.parse(localStorage.getItem("meeting_mom_processing_queue") || "[]");
 
 const $ = id => document.getElementById(id);
 
@@ -100,6 +101,44 @@ function setAudioControlsBusy(busy, message="") {
   if (message && $("uploadText")) $("uploadText").textContent = message;
 }
 
+function saveBackgroundProcessingQueue() {
+  try { localStorage.setItem("meeting_mom_processing_queue", JSON.stringify(backgroundProcessing.slice(0,10))); } catch (_) {}
+}
+
+function renderBackgroundProcessing() {
+  const card = $("backgroundProcessingCard");
+  const list = $("backgroundProcessingList");
+  if (!card || !list) return;
+  if (!backgroundProcessing.length) {
+    card.classList.add("hidden");
+    list.innerHTML = "";
+    return;
+  }
+  card.classList.remove("hidden");
+  list.innerHTML = backgroundProcessing.map(item => {
+    const title = escapeHtml(item.title || "Meeting");
+    const statusText = escapeHtml(item.statusText || "Processing request sent");
+    const time = item.created_at ? new Date(item.created_at).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}) : "";
+    return '<div class="background-row">' +
+      '<div><b>' + title + '</b><div class="muted small">' + time + '</div></div>' +
+      '<div class="background-status">' + statusText + '</div>' +
+      '</div>';
+  }).join("");
+}
+
+function addBackgroundProcessing(meeting, statusText) {
+  if (!meeting?.meeting?.id) return;
+  const item = {
+    id: meeting.meeting.id,
+    title: meeting.meeting.name || "Meeting",
+    statusText: statusText || "Processing request sent",
+    created_at: new Date().toISOString()
+  };
+  backgroundProcessing = [item, ...backgroundProcessing.filter(x => x.id !== item.id)].slice(0,10);
+  saveBackgroundProcessingQueue();
+  renderBackgroundProcessing();
+}
+
 function prepareNextMeeting() {
   const previous = meetingFolders;
   if (previous?.meeting?.id) {
@@ -137,6 +176,7 @@ function prepareNextMeeting() {
   $("uploadBox")?.classList.add("hidden");
   updateFilenamePreview();
   setAudioControlsBusy(false);
+  renderBackgroundProcessing();
   status("READY FOR NEXT MEETING. You can record or upload the next meeting now.", "success");
 }
 
@@ -287,6 +327,7 @@ function initGoogle() {
       $("connectBtn").classList.add("hidden");
       $("meetingCard").classList.remove("hidden");
       $("date").value = $("date").value || todayISO();
+      renderBackgroundProcessing();
       try {
         const restored = restoreMeetingState();
         await ensureAppDriveRoot();
@@ -757,11 +798,12 @@ async function stopMeeting() {
 
     try {
       await notifyProcessingStarted(completedMeeting);
+      addBackgroundProcessing(completedMeeting, "Processing started");
       pendingProcessingMeeting = null;
-      status("Meeting 1 audio is safely stored and processing has started. READY FOR NEXT MEETING.", "success");
+      status("Meeting 1 is processing in the background. READY FOR NEXT MEETING.", "success");
     } catch (triggerErr) {
+      addBackgroundProcessing(completedMeeting, "Waiting to start processing");
       status("Meeting 1 audio is safely stored. Processing could not be started automatically: " + triggerErr.message, "error");
-      ensureRetryButton();
     }
   } catch (err) {
     if (mediaStream) {
@@ -798,6 +840,7 @@ async function uploadSelectedAudio() {
       pendingProcessingMeeting = null;
       status("Audio is safely stored and processing has started. READY FOR NEXT MEETING.", "success");
     } catch (triggerErr) {
+      addBackgroundProcessing(completedMeeting, "Waiting to start processing");
       status("Audio is safely stored. Processing could not be started automatically: " + triggerErr.message, "error");
     }
   } catch (err) {
