@@ -26,9 +26,10 @@ function status(message, kind="") {
   el.className = "status " + kind;
 }
 
-const PROCESS_STAGES = ["upload","whisper","translation","ai","mom","complete"];
+const PROCESS_STAGES = ["checking","upload","whisper","translation","ai","mom","complete"];
 const PROCESS_LABELS = {
-  upload: "Audio uploaded to Google Drive",
+  checking: "Checking your existing meeting and audio",
+  upload: "Uploading audio to Google Drive",
   whisper: "Whisper transcription",
   translation: "English translation",
   ai: "AI understanding & evidence extraction",
@@ -56,6 +57,24 @@ function showProcessingUI(stage="upload", percent=10, stageEta="Calculating…",
 
 function showProcessingStartedUI() {
   showProcessingUI("upload", 10, "Calculating…", "Calculating…");
+}
+
+function showRecoveredProcessingUI() {
+  const card = $("processingCard");
+  if (!card) return;
+  card.classList.remove("hidden");
+  $("processingFill").style.width = "5%";
+  $("processingPercent").textContent = "5%";
+  PROCESS_STAGES.forEach((name, i) => {
+    const el = document.querySelector('.stage[data-stage="' + name + '"]');
+    if (!el) return;
+    el.classList.remove("done","active");
+    el.classList.toggle("active", name === "checking");
+  });
+  $("processingStageText").textContent = "Existing audio confirmed. It will NOT be uploaded again."; 
+  $("processingStageEta").textContent = "Stage remaining: Checking previous processing status…";
+  $("processingTotalEta").textContent = "Total estimated remaining: Calculating…";
+  showProcessingSummaryHint("Existing meeting found. Checking what has already been completed.");
 }
 
 function showProcessingSummaryHint(text) {
@@ -173,11 +192,12 @@ async function retryProcessing() {
       retryButton.disabled = true;
       retryButton.textContent = "STARTING PROCESSING...";
     }
-    status("Retrying automatic processing for the existing Drive audio...", "");
+    showRecoveredProcessingUI();
+    status("Existing audio confirmed. It will NOT be uploaded again. Checking previous processing status...", "");
     await notifyProcessingStarted();
     if (retryButton) retryButton.classList.add("hidden");
     if ($("uploadText")) $("uploadText").textContent = "Your meeting is now being processed.";
-      showProcessingStartedUI();
+      showRecoveredProcessingUI();
     status("Your meeting is now being processed. The existing audio was not uploaded again.", "success");
   } catch (err) {
     if (retryButton) {
