@@ -248,7 +248,7 @@ async function startMeeting() {
   }
 }
 
-async async function uploadSelectedAudio() {
+async function uploadSelectedAudio() {
   const file = $("audioFile").files[0];
   if (!file) {
     status("Choose an audio file first.", "error");
@@ -262,7 +262,7 @@ async async function uploadSelectedAudio() {
   }
 }
 
-function stopMeeting() {
+async function stopMeeting() {
   clearInterval(timerHandle);
   $("stopBtn").classList.add("hidden");
   $("startBtn").classList.remove("hidden");
