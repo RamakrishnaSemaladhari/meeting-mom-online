@@ -927,21 +927,59 @@ async function uploadSelectedAudio() {
 
 async function notifyProcessingStarted(snapshot) {
   snapshot = snapshot || meetingFolders;
-  if (!snapshot || !snapshot.meeting || !snapshot.audio) throw new Error("Meeting workspace information is missing.");
+  if (!snapshot || !snapshot.meeting || !snapshot.audio) {
+    throw new Error("Meeting workspace information is missing.");
+  }
+
   const requestStarted = new Date().toISOString();
-  const response = await fetch(CONFIG.gateway, {
-    method:"POST", headers:{"Content-Type":"text/plain;charset=UTF-8"},
-    body:JSON.stringify({action:"triggerProcessing", meeting_id:snapshot.meeting.id, meeting_folder_id:snapshot.meeting.id, audio_folder_id:snapshot.audio.id, metadata_file_id:snapshot.metadata ? snapshot.metadata.id : ""})
+
+  // Google Apps Script ContentService responses are redirected to
+  // script.googleusercontent.com. A browser fetch that tries to read the
+  // cross-origin response can therefore fail with "Failed to fetch" even
+  // when the POST itself reached Apps Script. Send a CORS-safe simple POST
+  // and use GitHub Actions polling as the authoritative confirmation.
+  try {
+    await fetch(CONFIG.gateway, {
+      method: "POST",
+      mode: "no-cors",
+      headers: {
+        "Content-Type": "text/plain;charset=UTF-8"
+      },
+      body: JSON.stringify({
+        action: "triggerProcessing",
+        meeting_id: snapshot.meeting.id,
+        meeting_folder_id: snapshot.meeting.id,
+        audio_folder_id: snapshot.audio.id,
+        metadata_file_id: snapshot.metadata ? snapshot.metadata.id : ""
+      })
+    });
+  } catch (err) {
+    throw new Error("Processing gateway request could not be sent: " + err.message);
+  }
+
+  const item = addBackgroundProcessing(snapshot, "Processing request sent", {
+    stage: "checking",
+    percent: 5
   });
-  if (!response.ok) throw new Error("Processing gateway failed ("+response.status+").");
-  const data = await response.json();
-  if (!data.ok) throw new Error(data.error || "Processing could not be started.");
-  const item = addBackgroundProcessing(snapshot,"Processing request sent",{stage:"checking",percent:5});
+
   if (retryButton) retryButton.classList.add("hidden");
-  if ($("uploadText")) $("uploadText").textContent = "Processing started. Existing audio will not be uploaded again.";
-  showRecoveredProcessingUI("Processing request sent. Waiting for GitHub Actions to begin.");
-  setTimeout(function(){ findAndMonitorLatestRun(item,requestStarted); },2500);
-  return data;
+  if ($("uploadText")) {
+    $("uploadText").textContent =
+      "Processing request sent. Existing audio will not be uploaded again.";
+  }
+
+  showRecoveredProcessingUI(
+    "Processing request sent. Waiting for GitHub Actions to begin."
+  );
+
+  setTimeout(function() {
+    findAndMonitorLatestRun(item, requestStarted);
+  }, 2500);
+
+  return {
+    ok: true,
+    status: "PROCESSING_REQUEST_SENT"
+  };
 }
 
 async function findAndMonitorLatestRun(item,requestStarted) {
