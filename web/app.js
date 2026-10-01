@@ -17,6 +17,7 @@ let mediaRecorder = null;
 let mediaStream = null;
 let recordedChunks = [];
 let isRecording = false;
+let pendingProcessingMeeting = null;
 
 const $ = id => document.getElementById(id);
 
@@ -743,35 +744,31 @@ async function stopMeeting() {
     }
 
     $("timer").textContent = formatTime(Date.now() - startedAt);
+
+    // The upload is the only blocking operation for starting another meeting.
     await uploadAudio(file);
     await updateMeetingMetadata();
 
-    setAudioControlsBusy(false);
-    $("uploadText").textContent = "Meeting 1 audio safely stored. Preparing processing...";
+    const completedMeeting = meetingFolders;
+    pendingProcessingMeeting = completedMeeting;
 
-    status("Recording saved to Google Drive. Preparing your meeting...", "");
+    // Audio is now safely in Drive. Prepare the browser immediately for Meeting 2.
+    prepareNextMeeting();
 
     try {
-      await notifyProcessingStarted();
-      $("uploadText").textContent = "Your meeting is now being processed.";
-      showProcessingStartedUI();
-      status("PROCESSING — your meeting is being understood and prepared. You can start the next meeting now.", "success");
-      prepareNextMeeting();
+      await notifyProcessingStarted(completedMeeting);
+      pendingProcessingMeeting = null;
+      status("Meeting 1 audio is safely stored and processing has started. READY FOR NEXT MEETING.", "success");
     } catch (triggerErr) {
+      status("Meeting 1 audio is safely stored. Processing could not be started automatically: " + triggerErr.message, "error");
       ensureRetryButton();
-      if (retryButton) retryButton.classList.remove("hidden");
-      status(triggerErr.message + " Use RETRY PROCESSING.", "error");
     }
-
-    $("stopBtn").classList.add("hidden");
-    $("startBtn").classList.remove("hidden");
-    setAudioControlsBusy(false);
-    prepareNextMeeting();
   } catch (err) {
     if (mediaStream) {
       mediaStream.getTracks().forEach(track => track.stop());
       mediaStream = null;
     }
+    setAudioControlsBusy(false);
     status(err.message, "error");
     $("stopBtn").classList.remove("hidden");
   } finally {
@@ -779,48 +776,6 @@ async function stopMeeting() {
     $("stopBtn").textContent = "STOP & SAVE";
   }
 }
-
-async function updateMeetingMetadata() {
-  if (!meetingFolders?.metadata?.id) return;
-  const metadata = {
-    meeting_id: meetingFolders.meeting.id,
-    title: $("title").value.trim(),
-    date: $("date").value,
-    start_time: $("startTime").value,
-    end_time: $("endTime").value,
-    venue: $("venue").value.trim(),
-    agenda: $("agenda").value.trim(),
-    participants: collectParticipants(),
-    updated_at: new Date().toISOString()
-  };
-  await uploadTextToFile(
-    meetingFolders.metadata.id,
-    JSON.stringify(metadata, null, 2),
-    "application/json"
-  );
-}
-
-async function notifyProcessingStarted() {
-  if (!meetingFolders?.meeting?.id || !meetingFolders?.audio?.id) {
-    throw new Error("Meeting workspace is not ready for processing.");
-  }
-  const payload = {
-    action: "triggerProcessing",
-    meeting_id: meetingFolders.meeting.id,
-    meeting_folder_id: meetingFolders.meeting.id,
-    audio_folder_id: meetingFolders.audio.id,
-    metadata_file_id: meetingFolders.metadata.id
-  };
-  const response = await fetch(CONFIG.gateway, {
-    method: "POST",
-    headers: {"Content-Type":"text/plain;charset=utf-8"},
-    body: JSON.stringify(payload)
-  });
-  const data = await response.json();
-  if (!data.ok) throw new Error(data.error || "Automatic processing trigger failed.");
-  return data;
-}
-
 async function uploadSelectedAudio() {
   const file = $("audioFile").files[0];
   if (!file) {
@@ -830,19 +785,20 @@ async function uploadSelectedAudio() {
   try {
     if (!meetingFolders) await createMeetingWorkspace();
     await uploadAudio(file);
-    setAudioControlsBusy(false);
-    $("uploadText").textContent = "Meeting audio safely stored. Preparing processing...";
-    status("Audio uploaded. Preparing your meeting...", "");
+    await updateMeetingMetadata();
+
+    const completedMeeting = meetingFolders;
+    pendingProcessingMeeting = completedMeeting;
+
+    // Upload is complete: immediately free the browser for the next meeting.
+    prepareNextMeeting();
+
     try {
-      await notifyProcessingStarted();
-      $("uploadText").textContent = "Your meeting is now being processed.";
-      ensureRetryButton();
-      if (retryButton) retryButton.classList.add("hidden");
-      status("PROCESSING — your meeting is being understood and prepared.", "success");
+      await notifyProcessingStarted(completedMeeting);
+      pendingProcessingMeeting = null;
+      status("Audio is safely stored and processing has started. READY FOR NEXT MEETING.", "success");
     } catch (triggerErr) {
-      ensureRetryButton();
-      status(triggerErr.message + " Use RETRY PROCESSING after correcting the gateway.", "error");
-      if (retryButton) retryButton.classList.remove("hidden");
+      status("Audio is safely stored. Processing could not be started automatically: " + triggerErr.message, "error");
     }
   } catch (err) {
     setAudioControlsBusy(false);
@@ -850,131 +806,3 @@ async function uploadSelectedAudio() {
   }
 }
 
-function copyTextFrom(id) {
-  const value = $(id)?.value || "";
-  if (!value) return;
-  navigator.clipboard.writeText(value)
-    .then(()=>status("Copied to clipboard.", "success"))
-    .catch(()=>status("Copy was blocked by the browser.", "error"));
-}
-
-function toggleEditor(id, buttonId) {
-  const field = $(id), button = $(buttonId);
-  if (!field || !button) return;
-  field.readOnly = !field.readOnly;
-  button.textContent = field.readOnly ? "EDIT" : "DONE EDITING";
-  if (!field.readOnly) field.focus();
-}
-
-function listenText(id) {
-  const value = $(id)?.value || "";
-  if (!value || !("speechSynthesis" in window)) {
-    status("Text-to-speech is not available in this browser.", "error");
-    return;
-  }
-  speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(value);
-  utterance.lang = "en-IN";
-  speechSynthesis.speak(utterance);
-}
-
-function showMeetingResults(data={}) {
-  const names = getMoMFileNames();
-  $("resultsCard").classList.remove("hidden");
-  $("resultMeetingName").textContent = ($("title").value.trim() || "Meeting") + " • " + formatMeetingDate($("date").value);
-  $("aiDocName").textContent = data.aiFileName || names.ai;
-  $("editedDocName").textContent = data.editedFileName || names.edited;
-  $("finalDocName").textContent = data.finalFileName || names.final;
-  $("editSummary").value = data.summary || "";
-  $("editDecisions").value = data.decisions || "";
-  $("editActions").value = data.actions || "";
-  $("editFollowup").value = data.followup || "";
-  $("editMom").value = data.mom || "";
-  if (data.aiDownloadUrl) { $("downloadAiBtn").disabled=false; $("downloadAiBtn").onclick=()=>window.open(data.aiDownloadUrl,"_blank"); }
-  if (data.editedDownloadUrl) { $("downloadEditedBtn").disabled=false; $("downloadEditedBtn").onclick=()=>window.open(data.editedDownloadUrl,"_blank"); }
-  if (data.finalDownloadUrl) { $("downloadFinalBtn").disabled=false; $("downloadFinalBtn").onclick=()=>window.open(data.finalDownloadUrl,"_blank"); }
-  if (data.meetingFolderUrl) { $("openDriveBtn").disabled=false; $("openDriveBtn").onclick=()=>window.open(data.meetingFolderUrl,"_blank"); }
-}
-
-async function saveFinalMom() {
-  const names = getMoMFileNames();
-  const payload = {
-    action: "saveFinalMom",
-    file_name: names.final,
-    meeting_id: meetingFolders?.meeting?.id || "",
-    summary: $("editSummary").value,
-    decisions: $("editDecisions").value,
-    actions: $("editActions").value,
-    followup: $("editFollowup").value,
-    mom: $("editMom").value
-  };
-  status("Saving final MoM...", "");
-  try {
-    const response = await fetch(CONFIG.gateway, {
-      method:"POST",
-      headers:{"Content-Type":"text/plain;charset=utf-8"},
-      body:JSON.stringify(payload)
-    });
-    const result = await response.json();
-    if (!result.ok) throw new Error(result.error || "Could not save final MoM.");
-    status("Final MoM saved as " + names.final, "success");
-  } catch (err) {
-    status(err.message, "error");
-  }
-}
-
-function setupVoiceButton(buttonId, targetId) {
-  const button = $(buttonId);
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    button.classList.add("hidden");
-    return;
-  }
-  button.addEventListener("click",()=>{
-    const recognition = new SpeechRecognition();
-    recognition.lang = "en-IN";
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-    recognition.onresult = e => {
-      const text = e.results[0][0].transcript;
-      $(targetId).value = text;
-    };
-    recognition.onerror = () => status("Voice input was not available. You can type instead.", "error");
-    recognition.start();
-  });
-}
-
-$("connectBtn").addEventListener("click", connectGoogle);
-$("startBtn").addEventListener("click", startMeeting);
-$("stopBtn").addEventListener("click", stopMeeting);
-$("addParticipant").addEventListener("click",()=>addParticipant());
-$("audioFile").addEventListener("change", ()=>{
-  const file = $("audioFile").files[0];
-  if (file) status("Audio selected: "+file.name+". Click UPLOAD AUDIO TO GOOGLE DRIVE.", "success");
-});
-$("uploadBtn").addEventListener("click", uploadSelectedAudio);
-ensureRecoveryButton();
-setupVoiceButton("titleVoice","title");
-setupVoiceButton("agendaVoice","agenda");
-$("date").value=todayISO();
-["title","date"].forEach(id => $(id)?.addEventListener("input", updateFilenamePreview));
-updateFilenamePreview();
-restoreMeetingState();
-
-["summary","decisions","actions","followup","mom"].forEach(key => {
-  const fieldId="edit"+key.charAt(0).toUpperCase()+key.slice(1);
-  const btnId=fieldId+"Btn";
-  const copyId="copy"+key.charAt(0).toUpperCase()+key.slice(1)+"Btn";
-  const listenId="listen"+key.charAt(0).toUpperCase()+key.slice(1)+"Btn";
-  $(btnId)?.addEventListener("click",()=>toggleEditor(fieldId,btnId));
-  $(copyId)?.addEventListener("click",()=>copyTextFrom(fieldId));
-  $(listenId)?.addEventListener("click",()=>listenText(fieldId));
-});
-$("saveFinalBtn")?.addEventListener("click", saveFinalMom);
-initGoogle();
-window.addEventListener("error", function(e) {
-  status("App error: " + (e.message || "JavaScript error"), "error");
-});
-window.addEventListener("unhandledrejection", function(e) {
-  status("App error: " + (e.reason?.message || e.reason || "Promise error"), "error");
-});
