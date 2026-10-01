@@ -1,0 +1,19 @@
+name: Meeting MoM Online
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [meeting-ready]
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Privacy boundary check
+        run: python processor/scripts/privacy_check.py
+      - name: Status
+        run: echo "Meeting MoM Online workflow is configured."
