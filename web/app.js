@@ -866,3 +866,114 @@ async function uploadSelectedAudio() {
   }
 }
 
+
+async function notifyProcessingStarted(snapshot) {
+  snapshot = snapshot || meetingFolders;
+  if (!snapshot || !snapshot.meeting || !snapshot.audio) throw new Error("Meeting workspace information is missing.");
+  const requestStarted = new Date().toISOString();
+  const response = await fetch(CONFIG.gateway, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action:"triggerProcessing", meeting_id:snapshot.meeting.id, meeting_folder_id:snapshot.meeting.id, audio_folder_id:snapshot.audio.id, metadata_file_id:snapshot.metadata ? snapshot.metadata.id : ""})
+  });
+  if (!response.ok) throw new Error("Processing gateway failed ("+response.status+").");
+  const data = await response.json();
+  if (!data.ok) throw new Error(data.error || "Processing could not be started.");
+  const item = addBackgroundProcessing(snapshot,"Processing request sent",{stage:"checking",percent:5});
+  setTimeout(function(){ findAndMonitorLatestRun(item,requestStarted); },2500);
+  return data;
+}
+
+async function findAndMonitorLatestRun(item,requestStarted) {
+  if (!item || !item.id) return;
+  try {
+    const url="https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs?event=repository_dispatch&per_page=10";
+    const r=await fetch(url,{headers:{"Accept":"application/vnd.github+json"}});
+    if (!r.ok) throw new Error("Could not read processing status.");
+    const data=await r.json();
+    const since=Date.parse(requestStarted)-30000;
+    const run=(data.workflow_runs||[]).find(function(x){return Date.parse(x.created_at)>=since;});
+    if (!run) { setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000); return; }
+    updateBackgroundProcessing(item.id,{runId:run.id,statusText:run.status==="completed" ? (run.conclusion==="success" ? "Processing complete" : "Processing failed") : "Processing started",percent:run.status==="completed"&&run.conclusion==="success"?100:8});
+    monitorWorkflowRun(Object.assign({},item,{runId:run.id}));
+  } catch(e) { setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},15000); }
+}
+
+async function monitorWorkflowRun(item) {
+  if (!item || !item.runId) return;
+  try {
+    const r=await fetch("https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs/"+item.runId+"/jobs",{headers:{"Accept":"application/vnd.github+json"}});
+    if (!r.ok) throw new Error("Workflow status unavailable.");
+    const data=await r.json();
+    const job=(data.jobs||[])[0];
+    const steps=job && job.steps ? job.steps : [];
+    const stages=[
+      {key:"checking",name:"Validate meeting request",pct:10,label:"Checking meeting and processor access"},
+      {key:"whisper",name:"Whisper transcription",pct:30,label:"Whisper transcription"},
+      {key:"translation",name:"English translation",pct:48,label:"English translation"},
+      {key:"ai",name:"AI understanding and evidence extraction",pct:68,label:"AI understanding & evidence extraction"},
+      {key:"mom",name:"MoM preparation and validation",pct:88,label:"MoM preparation & validation"},
+      {key:"complete",name:"Results ready",pct:100,label:"Results ready"}
+    ];
+    let current=stages[0];
+    for (const st of stages) {
+      const step=steps.find(function(x){return x.name===st.name;});
+      if (step && step.status==="in_progress") {current=st;break;}
+      if (step && step.conclusion==="success") current=st;
+    }
+    if (job && (job.conclusion==="failure" || job.conclusion==="cancelled")) {
+      updateBackgroundProcessing(item.id,{stage:"failed",statusText:"Processing failed"}); return;
+    }
+    if (job && job.status==="completed" && job.conclusion==="success") {
+      updateBackgroundProcessing(item.id,{stage:"complete",percent:100,statusText:"Results ready"});
+      await loadMeetingResults(item); return;
+    }
+    updateBackgroundProcessing(item.id,{stage:current.key,percent:current.pct,statusText:current.label});
+    setTimeout(function(){monitorWorkflowRun(item);},12000);
+  } catch(e) { setTimeout(function(){monitorWorkflowRun(item);},20000); }
+}
+
+async function loadMeetingResults(item) {
+  if (!accessToken || !item.aiFolderId) return;
+  try {
+    const files=await listDriveFiles("'"+item.aiFolderId+"' in parents and name = 'AI Evidence.json' and trashed = false");
+    if (!files.length) return;
+    const response=await driveRequest("https://www.googleapis.com/drive/v3/files/"+files[0].id+"?alt=media");
+    const evidence=await response.json();
+    $("resultMeetingName").textContent=item.title||"Meeting";
+    $("editSummary").value=evidence.summary||"";
+    $("editDecisions").value=(evidence.decisions||[]).map(function(x){return "- "+(x.decision||"")+" ["+(x.timestamp||"")+ "]\n  Evidence: "+(x.evidence||"");}).join("\n");
+    $("editActions").value=(evidence.action_items||[]).map(function(x){return "- "+(x.action||"")+" | Owner: "+(x.owner||"Not explicitly assigned")+" | Deadline: "+(x.deadline||"Not explicitly stated")+" | "+(x.timestamp||"")+"\n  Evidence: "+(x.evidence||"");}).join("\n");
+    $("editFollowup").value=(evidence.open_questions||[]).map(function(x){return "- "+x;}).join("\n");
+    $("editMom").value="AI UNDERSTANDING SUMMARY\n"+(evidence.summary||"")+"\n\nKEY DISCUSSIONS\n"+(evidence.discussion_points||[]).map(function(x){return "- "+x;}).join("\n")+"\n\nDECISIONS\n"+$("editDecisions").value+"\n\nACTION ITEMS\n"+$("editActions").value+"\n\nPENDING FOLLOW-UP\n"+$("editFollowup").value;
+    $("resultsCard").classList.remove("hidden");
+  } catch(e) { console.warn("Results load failed",e); }
+}
+
+function toggleEditor(id,buttonId) {
+  const el=$(id),btn=$(buttonId); if(!el||!btn)return; el.readOnly=!el.readOnly; btn.textContent=el.readOnly?"EDIT":"DONE";
+}
+async function copyField(id) { const el=$(id); if(!el)return; if(navigator.clipboard)await navigator.clipboard.writeText(el.value||""); status("Copied to clipboard.","success"); }
+function listenField(id) { const el=$(id); if(!el||!window.speechSynthesis)return; speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(el.value||"")); }
+function initSpeechButton(buttonId,inputId) {
+  const btn=$(buttonId),input=$(inputId); if(!btn||!input)return;
+  const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SpeechRecognition){btn.disabled=true;return;}
+  const rec=new SpeechRecognition(); rec.lang="en-IN"; rec.interimResults=false; rec.continuous=false;
+  btn.addEventListener("click",function(){rec.start();status("Listening...","");});
+  rec.onresult=function(e){input.value=e.results[0][0].transcript;input.dispatchEvent(new Event("input"));};
+}
+
+document.addEventListener("DOMContentLoaded",function(){
+  $("connectBtn")?.addEventListener("click",connectGoogle);
+  $("addParticipant")?.addEventListener("click",function(){addParticipant();});
+  $("uploadBtn")?.addEventListener("click",uploadSelectedAudio);
+  $("startBtn")?.addEventListener("click",startMeeting);
+  $("stopBtn")?.addEventListener("click",stopMeeting);
+  $("audioFile")?.addEventListener("change",function(){const f=$("audioFile").files[0];if(f)status("Audio selected: "+f.name+". Ready to upload.","");});
+  ["title","date","startTime","endTime","venue","agenda"].forEach(function(id){$(id)?.addEventListener("input",updateFilenamePreview);});
+  [["editSummaryBtn","editSummary"],["editDecisionsBtn","editDecisions"],["editActionsBtn","editActions"],["editFollowupBtn","editFollowup"],["editMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){toggleEditor(x[1],x[0]);});});
+  [["copySummaryBtn","editSummary"],["copyDecisionsBtn","editDecisions"],["copyActionsBtn","editActions"],["copyFollowupBtn","editFollowup"],["copyMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){copyField(x[1]);});});
+  [["listenSummaryBtn","editSummary"],["listenDecisionsBtn","editDecisions"],["listenActionsBtn","editActions"],["listenFollowupBtn","editFollowup"],["listenMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){listenField(x[1]);});});
+  initSpeechButton("titleVoice","title"); initSpeechButton("agendaVoice","agenda");
+  updateFilenamePreview(); renderBackgroundProcessing(); initGoogle();
+});
