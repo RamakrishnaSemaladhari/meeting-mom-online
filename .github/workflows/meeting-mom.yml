@@ -17,8 +17,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python with dependency cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: processor/requirements.txt
+
       - name: Install Python dependencies
-        run: python -m pip install --upgrade pip && pip install -r processor/requirements.txt
+        run: pip install -r processor/requirements.txt
 
       - name: Test Google Drive access
         env:
@@ -53,35 +60,117 @@ jobs:
         run: |
           if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
             echo "ERROR: GOOGLE_SERVICE_ACCOUNT_JSON GitHub secret is not configured."
-            echo "The web application can upload audio, but the private Drive audio cannot be processed until the processor service account is configured."
             exit 1
           fi
           echo "Google Drive processor credential is available."
 
-      - name: Install system tools
+      # ubuntu-latest already contains the common build/runtime tools we need.
+      # Only install them as a fallback if a future runner image removes one.
+      - name: Verify system tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg cmake build-essential git curl
+          missing=0
+          for tool in ffmpeg cmake git curl; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "$tool: pre-installed"
+            else
+              echo "$tool: missing"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Installing only missing system tools..."
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg cmake build-essential git curl
+          else
+            echo "All system tools are already available. Skipping apt installation."
+          fi
+
+      - name: Set up Python with dependency cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: processor/requirements.txt
 
       - name: Install Python dependencies
-        run: python -m pip install --upgrade pip && pip install -r processor/requirements.txt
-
-      - name: Prepare Whisper
         run: |
-          git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp
-          cmake -B whisper.cpp/build whisper.cpp
-          cmake --build whisper.cpp/build -j --config Release
-          mkdir -p whisper.cpp/models
-          curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin             https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+          echo "Installing Python dependencies from cached pip packages..."
+          pip install -r processor/requirements.txt
+
+      # Whisper.cpp is expensive to compile, so cache the final executable
+      # and model. The first run builds/downloads them; later meetings restore them.
+      - name: Restore Whisper runtime cache
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            whisper.cpp/build/bin/whisper-cli
+            whisper.cpp/models/ggml-small-q5_1.bin
+          key: ${{ runner.os }}-whisper-runtime-v1
+
+      - name: Prepare Whisper runtime
+        run: |
+          mkdir -p whisper.cpp/build/bin whisper.cpp/models
+
+          if [ -x whisper.cpp/build/bin/whisper-cli ]; then
+            echo "Whisper executable restored from cache."
+          else
+            echo "Whisper cache miss. Building Whisper.cpp once for the cache..."
+            git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
+            cmake -B whisper.cpp-src/build whisper.cpp-src
+            cmake --build whisper.cpp-src/build -j --config Release
+            cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
+            chmod +x whisper.cpp/build/bin/whisper-cli
+            rm -rf whisper.cpp-src
+          fi
+
+          if [ -f whisper.cpp/models/ggml-small-q5_1.bin ]; then
+            echo "Whisper model restored from cache."
+          else
+            echo "Downloading Whisper model once for the cache..."
+            curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin \
+              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+          fi
+
+          test -x whisper.cpp/build/bin/whisper-cli
+          test -s whisper.cpp/models/ggml-small-q5_1.bin
+          echo "Whisper runtime ready."
+
+      # Ollama model storage is also cached. The Ollama executable itself is
+      # small and is installed quickly; the large model does not need to be
+      # downloaded for every meeting.
+      - name: Restore AI model cache
+        id: ai-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama
+          key: ${{ runner.os }}-ollama-qwen2.5-1.5b-instruct-q3_K_L-v1
 
       - name: Prepare AI engine on GitHub runner
         env:
           AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
+          OLLAMA_MODELS: /home/runner/.ollama/models
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
+          mkdir -p "$OLLAMA_MODELS"
+
           ollama serve > /tmp/ollama.log 2>&1 &
-          for i in {1..30}; do curl -sf http://127.0.0.1:11434/api/tags && break || sleep 2; done
-          ollama pull "$AI_MODEL"
+          for i in {1..30}; do
+            if curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          if ollama list | awk 'NR>1 {print $1}' | grep -Fxq "$AI_MODEL"; then
+            echo "AI model restored from cache."
+          else
+            echo "AI model cache miss. Downloading model once for the cache..."
+            ollama pull "$AI_MODEL"
+          fi
+
+          echo "AI engine ready."
 
       - name: Whisper transcription
         env:
@@ -104,6 +193,7 @@ jobs:
       - name: AI understanding and evidence extraction
         env:
           AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
+          OLLAMA_MODELS: /home/runner/.ollama/models
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
@@ -113,6 +203,7 @@ jobs:
       - name: MoM preparation and validation
         env:
           AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
+          OLLAMA_MODELS: /home/runner/.ollama/models
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
