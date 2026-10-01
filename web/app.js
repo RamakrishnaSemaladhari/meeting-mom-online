@@ -248,7 +248,21 @@ async function startMeeting() {
   }
 }
 
-async function stopMeeting() {
+async async function uploadSelectedAudio() {
+  const file = $("audioFile").files[0];
+  if (!file) {
+    status("Choose an audio file first.", "error");
+    return;
+  }
+  try {
+    if (!meetingFolders) await createMeetingWorkspace();
+    await uploadAudio(file);
+  } catch (err) {
+    status(err.message, "error");
+  }
+}
+
+function stopMeeting() {
   clearInterval(timerHandle);
   $("stopBtn").classList.add("hidden");
   $("startBtn").classList.remove("hidden");
@@ -286,16 +300,11 @@ $("connectBtn").addEventListener("click", connectGoogle);
 $("startBtn").addEventListener("click", startMeeting);
 $("stopBtn").addEventListener("click", stopMeeting);
 $("addParticipant").addEventListener("click",()=>addParticipant());
-$("audioFile").addEventListener("change", async ()=>{
+$("audioFile").addEventListener("change", ()=>{
   const file = $("audioFile").files[0];
-  if (!file) return;
-  try {
-    await createMeetingWorkspace();
-    await uploadAudio(file);
-  } catch (err) {
-    status(err.message, "error");
-  }
+  if (file) status("Audio selected: "+file.name+". Click UPLOAD AUDIO TO GOOGLE DRIVE.", "success");
 });
+$("uploadBtn").addEventListener("click", uploadSelectedAudio);
 setupVoiceButton("titleVoice","title");
 setupVoiceButton("agendaVoice","agenda");
 $("date").value=todayISO();
