@@ -623,6 +623,35 @@ async function uploadTextToFile(fileId, text, mimeType) {
   return response.json();
 }
 
+async function updateMeetingMetadata() {
+  if (!meetingFolders?.metadata?.id) {
+    throw new Error("Meeting metadata file is not available.");
+  }
+
+  const metadata = {
+    meeting_id: meetingFolders.meeting.id,
+    title: $("title").value.trim(),
+    date: $("date").value,
+    start_time: $("startTime").value,
+    end_time: $("endTime").value,
+    venue: $("venue").value.trim(),
+    agenda: $("agenda").value.trim(),
+    participants: collectParticipants(),
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+
+  await uploadTextToFile(
+    meetingFolders.metadata.id,
+    JSON.stringify(metadata, null, 2),
+    "application/json"
+  );
+
+  persistMeetingState();
+  updateFilenamePreview();
+  return metadata;
+}
+
 async function uploadAudio(file) {
   if (!file) throw new Error("Please select an audio file first.");
   setAudioControlsBusy(true, "Uploading audio to Google Drive...");
