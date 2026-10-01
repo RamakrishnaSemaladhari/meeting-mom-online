@@ -93,7 +93,7 @@ def timestamped_segments(data):
     return out
 
 def ollama_json(transcript, metadata):
-    model = "qwen2.5:1.5b-instruct-q3_K_L"
+    model = os.environ.get("AI_MODEL", "qwen2.5:1.5b-instruct-q3_K_L")
     segments = timestamped_segments(transcript)
     evidence_text = "\n".join(
         f"[{x['start']:.2f}-{x['end']:.2f}] {x['text']}" for x in segments
