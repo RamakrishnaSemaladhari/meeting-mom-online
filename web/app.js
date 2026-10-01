@@ -1,6 +1,7 @@
 const CONFIG = {
   clientId: "143751867061-aq2n18bdepa6s23d6mrpufprtd7p87v7.apps.googleusercontent.com",
-  driveScope: "https://www.googleapis.com/auth/drive.file"
+  driveScope: "https://www.googleapis.com/auth/drive.file",
+  gateway: "https://script.google.com/macros/s/AKfycbwisXCTq0olYGcrJE2e2w1VqFSuLhjVvbGiYhGm4XzwrmAlYKlLudr9DwhYl2SYyFQE3w/exec"
 };
 
 let tokenClient = null;
@@ -256,6 +257,27 @@ async function startMeeting() {
   }
 }
 
+async function notifyProcessingStarted() {
+  if (!meetingFolders?.meeting?.id || !meetingFolders?.audio?.id) {
+    throw new Error("Meeting workspace is not ready for processing.");
+  }
+  const payload = {
+    action: "triggerProcessing",
+    meeting_id: meetingFolders.meeting.id,
+    meeting_folder_id: meetingFolders.meeting.id,
+    audio_folder_id: meetingFolders.audio.id,
+    metadata_file_id: meetingFolders.metadata.id
+  };
+  const response = await fetch(CONFIG.gateway, {
+    method: "POST",
+    headers: {"Content-Type":"text/plain;charset=utf-8"},
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json();
+  if (!data.ok) throw new Error(data.error || "Automatic processing trigger failed.");
+  return data;
+}
+
 async function uploadSelectedAudio() {
   const file = $("audioFile").files[0];
   if (!file) {
@@ -265,6 +287,11 @@ async function uploadSelectedAudio() {
   try {
     if (!meetingFolders) await createMeetingWorkspace();
     await uploadAudio(file);
+    $("uploadText").textContent = "Audio uploaded. Starting automatic processing...";
+    status("Audio uploaded. Starting automatic processing...", "");
+    const trigger = await notifyProcessingStarted();
+    $("uploadText").textContent = "Processing started automatically.";
+    status("Processing started automatically. You do not need to run GitHub Actions.", "success");
   } catch (err) {
     status(err.message, "error");
   }
