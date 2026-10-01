@@ -126,15 +126,32 @@ function renderBackgroundProcessing() {
   }).join("");
 }
 
-function addBackgroundProcessing(meeting, statusText) {
-  if (!meeting?.meeting?.id) return;
+function addBackgroundProcessing(meeting, statusText, extra) {
+  if (!meeting || !meeting.meeting || !meeting.meeting.id) return;
+  extra = extra || {};
+  const existing = backgroundProcessing.find(x => x.id === meeting.meeting.id);
   const item = {
     id: meeting.meeting.id,
     title: meeting.meeting.name || "Meeting",
     statusText: statusText || "Processing request sent",
-    created_at: new Date().toISOString()
+    created_at: existing && existing.created_at ? existing.created_at : new Date().toISOString(),
+    meetingFolderId: meeting.meeting.id,
+    aiFolderId: meeting.ai && meeting.ai.id ? meeting.ai.id : (existing && existing.aiFolderId ? existing.aiFolderId : ""),
+    momFolderId: meeting.mom && meeting.mom.id ? meeting.mom.id : (existing && existing.momFolderId ? existing.momFolderId : ""),
+    runId: extra.runId || (existing && existing.runId ? existing.runId : ""),
+    percent: extra.percent !== undefined ? extra.percent : (existing && existing.percent !== undefined ? existing.percent : 0),
+    stage: extra.stage || (existing && existing.stage ? existing.stage : "checking")
   };
   backgroundProcessing = [item, ...backgroundProcessing.filter(x => x.id !== item.id)].slice(0,10);
+  saveBackgroundProcessingQueue();
+  renderBackgroundProcessing();
+  return item;
+}
+
+function updateBackgroundProcessing(id, patch) {
+  const item = backgroundProcessing.find(x => x.id === id);
+  if (!item) return;
+  Object.assign(item, patch || {});
   saveBackgroundProcessingQueue();
   renderBackgroundProcessing();
 }
