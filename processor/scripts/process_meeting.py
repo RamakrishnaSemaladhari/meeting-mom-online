@@ -184,64 +184,107 @@ def build_mom_doc(metadata, evidence):
         doc.add_paragraph(str(x), style="List Bullet")
     return doc
 
+def metadata_from_drive(service, meeting_folder):
+    meta_files = service.files().list(
+        q=f"'{meeting_folder}' in parents and name = 'meeting_metadata.json' and trashed = false",
+        pageSize=1, fields="files(id)"
+    ).execute().get("files", [])
+    if not meta_files:
+        raise RuntimeError("meeting_metadata.json was not found.")
+    raw = service.files().get_media(fileId=meta_files[0]["id"]).execute()
+    return json.loads(raw.decode("utf-8"))
+
+def output_folders(service, meeting_folder):
+    children = service.files().list(
+        q=f"'{meeting_folder}' in parents and trashed = false",
+        pageSize=50, fields="files(id,name,mimeType)"
+    ).execute().get("files", [])
+    return {x["name"]: x["id"] for x in children if x["mimeType"] == "application/vnd.google-apps.folder"}
+
+def stage_paths():
+    root = Path(".meeting_work")
+    root.mkdir(exist_ok=True)
+    return {
+        "root": root,
+        "source": root / "source_audio",
+        "wav": root / "meeting.wav",
+        "transcript_json": root / "transcript.json",
+        "transcript_txt": root / "transcript.txt",
+        "translation_json": root / "translation.json",
+        "translation_txt": root / "translation.txt",
+        "evidence": root / "evidence.json",
+        "mom": root / "AI_MOM.docx",
+    }
+
+def stage_download(service, audio_folder_id, paths):
+    audio = find_audio(service, audio_folder_id)
+    log("Downloading meeting audio from Google Drive: " + audio["name"])
+    download_file(service, audio["id"], paths["source"])
+    log("Converting audio to 16 kHz mono WAV...")
+    run(["ffmpeg","-y","-i",str(paths["source"]),"-ar","16000","-ac","1","-c:a","pcm_s16le",str(paths["wav"])])
+
+def stage_whisper(service, audio_folder_id, transcript_folder_id, paths):
+    if not paths["wav"].exists():
+        stage_download(service, audio_folder_id, paths)
+    log("Running Whisper transcription...")
+    data, text = whisper_json(paths["wav"], paths["root"] / "transcript", translate=False)
+    paths["transcript_json"].write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    paths["transcript_txt"].write_text(text, encoding="utf-8")
+    upload_text(service, transcript_folder_id, "Original Transcript.txt", text)
+    upload_text(service, transcript_folder_id, "Transcript.json", json.dumps(data, ensure_ascii=False, indent=2), "application/json")
+
+def stage_translation(service, translation_folder_id, paths):
+    if not paths["wav"].exists():
+        raise RuntimeError("WAV audio is missing before translation stage.")
+    log("Running Whisper English translation...")
+    data, text = whisper_json(paths["wav"], paths["root"] / "translation", translate=True)
+    paths["translation_json"].write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    paths["translation_txt"].write_text(text, encoding="utf-8")
+    upload_text(service, translation_folder_id, "English Translation.txt", text)
+    upload_text(service, translation_folder_id, "Translation.json", json.dumps(data, ensure_ascii=False, indent=2), "application/json")
+
+def stage_ai(service, meeting_folder, ai_folder_id, paths):
+    metadata = metadata_from_drive(service, meeting_folder)
+    data = json.loads(paths["transcript_json"].read_text(encoding="utf-8"))
+    log("Running local AI understanding and evidence extraction...")
+    evidence = ollama_json(data, metadata)
+    paths["evidence"].write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    upload_text(service, ai_folder_id, "AI Evidence.json", json.dumps(evidence, ensure_ascii=False, indent=2), "application/json")
+
+def stage_mom(service, meeting_folder, mom_folder_id, paths):
+    metadata = metadata_from_drive(service, meeting_folder)
+    evidence = json.loads(paths["evidence"].read_text(encoding="utf-8"))
+    log("Preparing and validating MoM...")
+    doc = build_mom_doc(metadata, evidence)
+    doc.save(paths["mom"])
+    upload_bytes(service, mom_folder_id, f"{metadata.get('title','Meeting')} - AI_MOM.docx", paths["mom"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    upload_text(service, mom_folder_id, "PROCESSING_COMPLETE.json", json.dumps({
+        "meeting_id": os.environ.get("MEETING_ID",""),
+        "status": "complete"
+    }, indent=2), "application/json")
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stage", choices=["whisper","translation","ai","mom","all"], default="all")
+    args = parser.parse_args()
+
     meeting_folder = require_env("MEETING_FOLDER_ID")
     audio_folder = require_env("AUDIO_FOLDER_ID")
-    meeting_id = require_env("MEETING_ID")
     service = drive_service()
+    folders = output_folders(service, meeting_folder)
+    paths = stage_paths()
 
-    with tempfile.TemporaryDirectory(prefix="meeting_mom_") as tmp:
-        tmp = Path(tmp)
-        log("Downloading meeting audio from Google Drive...")
-        audio = find_audio(service, audio_folder)
-        source = tmp / audio["name"]
-        download_file(service, audio["id"], source)
+    if args.stage in ("whisper","all"):
+        stage_whisper(service, audio_folder, folders["TRANSCRIPT"], paths)
+    if args.stage in ("translation","all"):
+        stage_translation(service, folders["TRANSLATION"], paths)
+    if args.stage in ("ai","all"):
+        stage_ai(service, meeting_folder, folders["AI"], paths)
+    if args.stage in ("mom","all"):
+        stage_mom(service, meeting_folder, folders["MOM"], paths)
 
-        log("Converting audio to 16 kHz mono WAV...")
-        wav = tmp / "meeting.wav"
-        run(["ffmpeg","-y","-i",str(source),"-ar","16000","-ac","1","-c:a","pcm_s16le",str(wav)])
-
-        log("Running Whisper transcription...")
-        original_json, original_text = whisper_json(wav, tmp / "transcript", translate=False)
-
-        log("Running Whisper English translation...")
-        translated_json, translated_text = whisper_json(wav, tmp / "translation", translate=True)
-
-        log("Loading meeting metadata...")
-        meta_files = service.files().list(
-            q=f"'{meeting_folder}' in parents and name = 'meeting_metadata.json' and trashed = false",
-            pageSize=1, fields="files(id)"
-        ).execute().get("files", [])
-        if not meta_files:
-            raise RuntimeError("meeting_metadata.json was not found.")
-        meta_bytes = service.files().get_media(fileId=meta_files[0]["id"]).execute()
-        metadata = json.loads(meta_bytes.decode("utf-8"))
-
-        log("Starting local AI understanding...")
-        evidence = ollama_json(original_json, metadata)
-
-        log("Preparing validated MoM...")
-        doc = build_mom_doc(metadata, evidence)
-        docx_path = tmp / "AI_MOM.docx"
-        doc.save(docx_path)
-
-        # Locate output folders.
-        children = service.files().list(
-            q=f"'{meeting_folder}' in parents and trashed = false",
-            pageSize=50, fields="files(id,name,mimeType)"
-        ).execute().get("files", [])
-        folders = {x["name"]: x["id"] for x in children if x["mimeType"] == "application/vnd.google-apps.folder"}
-
-        log("Saving transcript, translation, AI evidence and MoM to Google Drive...")
-        upload_text(service, folders["TRANSCRIPT"], f"{metadata.get('title','Meeting')} - Original Transcript.txt", original_text)
-        upload_text(service, folders["TRANSCRIPT"], f"{metadata.get('title','Meeting')} - Transcript.json", json.dumps(original_json, ensure_ascii=False, indent=2), "application/json")
-        upload_text(service, folders["TRANSLATION"], f"{metadata.get('title','Meeting')} - English Translation.txt", translated_text)
-        upload_text(service, folders["TRANSLATION"], f"{metadata.get('title','Meeting')} - Translation.json", json.dumps(translated_json, ensure_ascii=False, indent=2), "application/json")
-        upload_text(service, folders["AI"], f"{metadata.get('title','Meeting')} - AI Evidence.json", json.dumps(evidence, ensure_ascii=False, indent=2), "application/json")
-        upload_bytes(service, folders["MOM"], f"{metadata.get('title','Meeting')} - AI_MOM.docx", docx_path, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        upload_text(service, folders["MOM"], f"{metadata.get('title','Meeting')} - PROCESSING_COMPLETE.json", json.dumps({"meeting_id":meeting_id,"status":"complete"}, indent=2), "application/json")
-
-    log("PROCESSING COMPLETE")
+    log("STAGE COMPLETE: " + args.stage)
 
 if __name__ == "__main__":
     try:
