@@ -36,7 +36,7 @@ const PROCESS_LABELS = {
   complete: "Results ready"
 };
 
-function showProcessingUI(stage="upload", percent=10, eta="Calculating…") {
+function showProcessingUI(stage="upload", percent=10, stageEta="Calculating…", totalEta="Calculating…") {
   const card = $("processingCard");
   if (!card) return;
   card.classList.remove("hidden");
@@ -50,11 +50,12 @@ function showProcessingUI(stage="upload", percent=10, eta="Calculating…") {
   $("processingFill").style.width = Math.max(0, Math.min(100, percent)) + "%";
   $("processingPercent").textContent = Math.round(percent) + "%";
   $("processingStageText").textContent = PROCESS_LABELS[stage] || "Processing...";
-  $("processingEta").textContent = "Time remaining: " + (eta || "—");
+  $("processingStageEta").textContent = "Stage remaining: " + (stageEta || "—");
+  $("processingTotalEta").textContent = "Total estimated remaining: " + (totalEta || "—");
 }
 
 function showProcessingStartedUI() {
-  showProcessingUI("upload", 10, "Calculating…");
+  showProcessingUI("upload", 10, "Calculating…", "Calculating…");
 }
 
 function showProcessingSummaryHint(text) {
@@ -139,7 +140,7 @@ function ensureRetryButton() {
   retryButton = document.createElement("button");
   retryButton.type = "button";
   retryButton.className = "secondary";
-  retryButton.textContent = "RETRY AUTOMATIC PROCESSING";
+  retryButton.textContent = "RETRY PROCESSING";
   retryButton.style.marginTop = "10px";
   retryButton.addEventListener("click", retryProcessing);
   box.appendChild(retryButton);
@@ -163,13 +164,13 @@ async function retryProcessing() {
     status("Retrying automatic processing for the existing Drive audio...", "");
     await notifyProcessingStarted();
     if (retryButton) retryButton.classList.add("hidden");
-    if ($("uploadText")) $("uploadText").textContent = "Processing started automatically.";
+    if ($("uploadText")) $("uploadText").textContent = "Your meeting is now being processed.";
       showProcessingStartedUI();
-    status("Processing started automatically. The existing audio was not uploaded again.", "success");
+    status("Your meeting is now being processed. The existing audio was not uploaded again.", "success");
   } catch (err) {
     if (retryButton) {
       retryButton.disabled = false;
-      retryButton.textContent = "RETRY AUTOMATIC PROCESSING";
+      retryButton.textContent = "RETRY PROCESSING";
     }
     status(err.message, "error");
   }
@@ -655,18 +656,18 @@ async function stopMeeting() {
     await uploadAudio(file);
     await updateMeetingMetadata();
 
-    $("uploadText").textContent = "Recording uploaded. Starting automatic processing...";
-    status("Recording saved to Google Drive. Starting automatic processing...", "");
+    $("uploadText").textContent = "Recording uploaded. Preparing your meeting...";
+    status("Recording saved to Google Drive. Preparing your meeting...", "");
 
     try {
       await notifyProcessingStarted();
-      $("uploadText").textContent = "Processing started automatically.";
+      $("uploadText").textContent = "Your meeting is now being processed.";
       showProcessingStartedUI();
-      status("Processing started automatically. You do not need to run GitHub Actions.", "success");
+      status("PROCESSING — your meeting is being understood and prepared.", "success");
     } catch (triggerErr) {
       ensureRetryButton();
       if (retryButton) retryButton.classList.remove("hidden");
-      status(triggerErr.message + " Use RETRY AUTOMATIC PROCESSING.", "error");
+      status(triggerErr.message + " Use RETRY PROCESSING.", "error");
     }
 
     $("stopBtn").classList.add("hidden");
@@ -734,17 +735,17 @@ async function uploadSelectedAudio() {
   try {
     if (!meetingFolders) await createMeetingWorkspace();
     await uploadAudio(file);
-    $("uploadText").textContent = "Audio uploaded. Starting automatic processing...";
-    status("Audio uploaded. Starting automatic processing...", "");
+    $("uploadText").textContent = "Audio uploaded. Preparing your meeting...";
+    status("Audio uploaded. Preparing your meeting...", "");
     try {
       await notifyProcessingStarted();
-      $("uploadText").textContent = "Processing started automatically.";
+      $("uploadText").textContent = "Your meeting is now being processed.";
       ensureRetryButton();
       if (retryButton) retryButton.classList.add("hidden");
-      status("Processing started automatically. You do not need to run GitHub Actions.", "success");
+      status("PROCESSING — your meeting is being understood and prepared.", "success");
     } catch (triggerErr) {
       ensureRetryButton();
-      status(triggerErr.message + " Use RETRY AUTOMATIC PROCESSING after correcting the gateway.", "error");
+      status(triggerErr.message + " Use RETRY PROCESSING after correcting the gateway.", "error");
       if (retryButton) retryButton.classList.remove("hidden");
     }
   } catch (err) {
