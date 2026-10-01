@@ -82,6 +82,63 @@ function showProcessingSummaryHint(text) {
   if (el && text) el.textContent = text;
 }
 
+function setAudioControlsBusy(busy, message="") {
+  const start = $("startBtn");
+  const upload = $("uploadBtn");
+  const file = $("audioFile");
+  if (start) start.disabled = !!busy;
+  if (upload) upload.disabled = !!busy;
+  if (file) file.disabled = !!busy;
+  if (busy) {
+    if (start) start.classList.add("hidden");
+    if (upload) upload.classList.add("hidden");
+  } else {
+    if (!isRecording) start?.classList.remove("hidden");
+    upload?.classList.remove("hidden");
+  }
+  if (message && $("uploadText")) $("uploadText").textContent = message;
+}
+
+function prepareNextMeeting() {
+  const previous = meetingFolders;
+  if (previous?.meeting?.id) {
+    try {
+      const history = JSON.parse(localStorage.getItem("meeting_mom_history") || "[]");
+      history.unshift({
+        meeting: previous.meeting,
+        audio: previous.audio,
+        transcript: previous.transcript,
+        translation: previous.translation,
+        ai: previous.ai,
+        mom: previous.mom,
+        metadata: previous.metadata,
+        audioUploaded: !!audioUploaded,
+        archived_at: new Date().toISOString()
+      });
+      localStorage.setItem("meeting_mom_history", JSON.stringify(history.slice(0,20)));
+    } catch (_) {}
+  }
+
+  meetingFolders = null;
+  audioUploaded = false;
+  localStorage.removeItem("meeting_mom_active_meeting");
+
+  $("title").value = "";
+  $("date").value = todayISO();
+  $("startTime").value = "";
+  $("endTime").value = "";
+  $("venue").value = "";
+  $("agenda").value = "";
+  $("participants").innerHTML = "";
+  $("audioFile").value = "";
+  $("timer").textContent = "00:00:00";
+  $("processingCard")?.classList.add("hidden");
+  $("uploadBox")?.classList.add("hidden");
+  updateFilenamePreview();
+  setAudioControlsBusy(false);
+  status("READY FOR NEXT MEETING. You can record or upload the next meeting now.", "success");
+}
+
 function todayISO() {
   const d = new Date();
   const local = new Date(d.getTime() - d.getTimezoneOffset()*60000);
@@ -480,6 +537,7 @@ async function uploadTextToFile(fileId, text, mimeType) {
 
 async function uploadAudio(file) {
   if (!file) throw new Error("Please select an audio file first.");
+  setAudioControlsBusy(true, "Uploading audio to Google Drive...");
   if (!meetingFolders) await createMeetingWorkspace();
 
   $("uploadBox").classList.remove("hidden");
@@ -532,7 +590,7 @@ async function uploadAudio(file) {
       audioUploaded = true;
       persistMeetingState();
       ensureRetryButton();
-      status("Meeting audio uploaded successfully.", "success");
+      status("Meeting audio uploaded successfully. You can now prepare the next meeting.", "success");
       return uploaded;
     } else {
       throw new Error("Audio upload failed ("+response.status+").");
@@ -688,14 +746,17 @@ async function stopMeeting() {
     await uploadAudio(file);
     await updateMeetingMetadata();
 
-    $("uploadText").textContent = "Recording uploaded. Preparing your meeting...";
+    setAudioControlsBusy(false);
+    $("uploadText").textContent = "Meeting 1 audio safely stored. Preparing processing...";
+
     status("Recording saved to Google Drive. Preparing your meeting...", "");
 
     try {
       await notifyProcessingStarted();
       $("uploadText").textContent = "Your meeting is now being processed.";
       showProcessingStartedUI();
-      status("PROCESSING — your meeting is being understood and prepared.", "success");
+      status("PROCESSING — your meeting is being understood and prepared. You can start the next meeting now.", "success");
+      prepareNextMeeting();
     } catch (triggerErr) {
       ensureRetryButton();
       if (retryButton) retryButton.classList.remove("hidden");
@@ -704,6 +765,8 @@ async function stopMeeting() {
 
     $("stopBtn").classList.add("hidden");
     $("startBtn").classList.remove("hidden");
+    setAudioControlsBusy(false);
+    prepareNextMeeting();
   } catch (err) {
     if (mediaStream) {
       mediaStream.getTracks().forEach(track => track.stop());
@@ -767,7 +830,8 @@ async function uploadSelectedAudio() {
   try {
     if (!meetingFolders) await createMeetingWorkspace();
     await uploadAudio(file);
-    $("uploadText").textContent = "Audio uploaded. Preparing your meeting...";
+    setAudioControlsBusy(false);
+    $("uploadText").textContent = "Meeting audio safely stored. Preparing processing...";
     status("Audio uploaded. Preparing your meeting...", "");
     try {
       await notifyProcessingStarted();
@@ -781,6 +845,7 @@ async function uploadSelectedAudio() {
       if (retryButton) retryButton.classList.remove("hidden");
     }
   } catch (err) {
+    setAudioControlsBusy(false);
     status(err.message, "error");
   }
 }
