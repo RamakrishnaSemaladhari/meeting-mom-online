@@ -1,0 +1,7 @@
+{
+  "service": "Meeting MoM Online",
+  "mode": "privacy-first",
+  "drive_gateway": "https://script.google.com/macros/s/AKfycbwisXCTq0olYGcrJE2e2w1VqFSuLhjVvbGiYhGm4XzwrmAlYKlLudr9DwhYl2SYyFQE3w/exec",
+  "root_folder_id": "1kfwyuKxXdywPy9jhZjghFI4yGJEwh-Yl",
+  "note": "Public configuration only. No credentials or meeting content."
+}
