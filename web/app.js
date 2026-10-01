@@ -1158,7 +1158,7 @@ async function loadMeetingResults(item) {
     const evidence=await response.json();
     $("resultMeetingName").textContent=item.title||"Meeting";
     $("editSummary").value=evidence.summary||"";
-    $("editDecisions").value=(evidence.decisions||[]).map(function(x){return "- "+(x.decision||")+" ["+(x.timestamp||"")+"]\n  Evidence: "+(x.evidence||"");}).join("\n");
+    $("editDecisions").value=(evidence.decisions||[]).map(function(x){return "- "+(x.decision||"")+" ["+(x.timestamp||"")+"]\n  Evidence: "+(x.evidence||"");}).join("\n");
     $("editActions").value=(evidence.action_items||[]).map(function(x){return "- "+(x.action||"")+" | Owner: "+(x.owner||"Not explicitly assigned")+" | Deadline: "+(x.deadline||"Not explicitly stated")+" | "+(x.timestamp||"")+"\n  Evidence: "+(x.evidence||"");}).join("\n");
     $("editFollowup").value=(evidence.open_questions||[]).map(function(x){return "- "+x;}).join("\n");
     $("editMom").value="AI UNDERSTANDING SUMMARY\n"+(evidence.summary||"")+"\n\nKEY DISCUSSIONS\n"+(evidence.discussion_points||[]).map(function(x){return "- "+x;}).join("\n")+"\n\nDECISIONS\n"+$("editDecisions").value+"\n\nACTION ITEMS\n"+$("editActions").value+"\n\nPENDING FOLLOW-UP\n"+$("editFollowup").value;
