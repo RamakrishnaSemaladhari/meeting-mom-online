@@ -126,6 +126,13 @@ function restoreMeetingState() {
     if (!state?.meeting?.id || !state?.audio?.id) return false;
     meetingFolders = state;
     audioUploaded = !!state.audioUploaded;
+    const box = $("uploadBox");
+    if (box) {
+      box.classList.remove("hidden");
+      $("uploadText").textContent = audioUploaded
+        ? "Previous meeting audio is available. You can retry processing."
+        : "Previous meeting workspace restored.";
+    }
     ensureRetryButton();
     return true;
   } catch (_) {
@@ -134,9 +141,14 @@ function restoreMeetingState() {
 }
 
 function ensureRetryButton() {
-  if (retryButton || !meetingFolders?.meeting?.id) return;
+  if (!meetingFolders?.meeting?.id) return;
   const box = $("uploadBox");
   if (!box) return;
+  box.classList.remove("hidden");
+  if (retryButton) {
+    retryButton.classList.remove("hidden");
+    return;
+  }
   retryButton = document.createElement("button");
   retryButton.type = "button";
   retryButton.className = "secondary";
@@ -750,19 +762,6 @@ async function uploadSelectedAudio() {
     }
   } catch (err) {
     status(err.message, "error");
-  }
-}
-
-async function stopMeeting() {
-  clearInterval(timerHandle);
-  $("stopBtn").classList.add("hidden");
-  $("startBtn").classList.remove("hidden");
-  const file = $("audioFile").files[0];
-  if (file) {
-    try { await uploadAudio(file); }
-    catch (err) { status(err.message, "error"); }
-  } else {
-    status("Recording session stopped. Native recorder upload integration will use this meeting AUDIO folder.", "success");
   }
 }
 
