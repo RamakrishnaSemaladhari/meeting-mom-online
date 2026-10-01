@@ -978,8 +978,153 @@ async function monitorWorkflowRun(item) {
   } catch(e) { setTimeout(function(){monitorWorkflowRun(item);},20000); }
 }
 
+let currentResultItem = null;
+
+async function downloadDriveFile(fileId, fileName) {
+  if (!fileId || !accessToken) throw new Error("Google Drive is not connected.");
+  const response = await driveRequest("https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(fileId) + "?alt=media");
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName || "Meeting_MoM.docx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function createDocxBlob(title, sections) {
+  const { Document, Packer, Paragraph, TextRun, HeadingLevel } =
+    await import("https://cdn.jsdelivr.net/npm/docx@9.8.1/+esm");
+
+  const children = [
+    new Paragraph({
+      text: title || "Minutes of Meeting",
+      heading: HeadingLevel.TITLE
+    })
+  ];
+
+  (sections || []).forEach(section => {
+    children.push(new Paragraph({
+      text: section.heading,
+      heading: HeadingLevel.HEADING_1
+    }));
+    const values = Array.isArray(section.items) ? section.items : [section.text || ""];
+    values.forEach(value => {
+      const text = String(value || "").trim();
+      if (text) children.push(new Paragraph({
+        children: [new TextRun(text)]
+      }));
+    });
+  });
+
+  const doc = new Document({
+    sections: [{ children }]
+  });
+  return Packer.toBlob(doc);
+}
+
+async function uploadBlobToDrive(parentId, name, blob, mime) {
+  if (!parentId) throw new Error("MoM Drive folder is missing.");
+  const metadata = JSON.stringify({
+    name,
+    parents: [parentId],
+    mimeType: mime
+  });
+  const boundary = "meetingmom_" + Date.now();
+  const body = new Blob([
+    "--" + boundary + "\r\n",
+    "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+    metadata + "\r\n",
+    "--" + boundary + "\r\n",
+    "Content-Type: " + mime + "\r\n\r\n",
+    blob,
+    "\r\n--" + boundary + "--"
+  ], { type: "multipart/related; boundary=" + boundary });
+
+  const response = await driveRequest(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "multipart/related; boundary=" + boundary
+      },
+      body
+    }
+  );
+  return response.json();
+}
+
+function resultSectionsFromEditor() {
+  return [
+    { heading: "AI Understanding / Executive Summary", text: $("editSummary")?.value || "" },
+    { heading: "Decisions", text: $("editDecisions")?.value || "" },
+    { heading: "Action Items", text: $("editActions")?.value || "" },
+    { heading: "Pending Follow-up", text: $("editFollowup")?.value || "" },
+    { heading: "Full Minutes of Meeting", text: $("editMom")?.value || "" }
+  ];
+}
+
+async function saveFinalMom() {
+  if (!currentResultItem?.momFolderId) {
+    status("The meeting MoM Drive folder is not available yet.", "error");
+    return;
+  }
+
+  const button = $("saveFinalBtn");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "SAVING FINAL MOM...";
+  }
+
+  try {
+    const names = getMoMFileNames();
+    const sections = resultSectionsFromEditor();
+    const blob = await createDocxBlob($("resultMeetingName")?.textContent || "Minutes of Meeting", sections);
+
+    // Keep an editable snapshot and a final snapshot in the meeting MOM folder.
+    const edited = await uploadBlobToDrive(
+      currentResultItem.momFolderId,
+      names.edited,
+      blob,
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    const finalBlob = await createDocxBlob($("resultMeetingName")?.textContent || "Minutes of Meeting", sections);
+    const final = await uploadBlobToDrive(
+      currentResultItem.momFolderId,
+      names.final,
+      finalBlob,
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+
+    setDocumentButton("downloadEditedBtn", edited.id, names.edited);
+    setDocumentButton("downloadFinalBtn", final.id, names.final);
+    $("editedDocName").textContent = names.edited;
+    $("finalDocName").textContent = names.final;
+    status("Final MoM saved to Google Drive.", "success");
+  } catch (err) {
+    status("Final MoM could not be saved: " + err.message, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "SAVE FINAL MOM";
+    }
+  }
+}
+
+function setDocumentButton(buttonId, fileId, fileName) {
+  const button = $(buttonId);
+  if (!button) return;
+  button.disabled = !fileId;
+  button.onclick = fileId
+    ? () => downloadDriveFile(fileId, fileName)
+    : null;
+}
+
 async function loadMeetingResults(item) {
-  if (!accessToken || !item.aiFolderId) return;
+  if (!accessToken || !item?.aiFolderId) return;
+  currentResultItem = item;
   try {
     const files=await listDriveFiles("'"+item.aiFolderId+"' in parents and name = 'AI Evidence.json' and trashed = false");
     if (!files.length) return;
@@ -987,13 +1132,41 @@ async function loadMeetingResults(item) {
     const evidence=await response.json();
     $("resultMeetingName").textContent=item.title||"Meeting";
     $("editSummary").value=evidence.summary||"";
-    $("editDecisions").value=(evidence.decisions||[]).map(function(x){return "- "+(x.decision||"")+" ["+(x.timestamp||"")+ "]\n  Evidence: "+(x.evidence||"");}).join("\n");
+    $("editDecisions").value=(evidence.decisions||[]).map(function(x){return "- "+(x.decision||")+" ["+(x.timestamp||"")+"]\n  Evidence: "+(x.evidence||"");}).join("\n");
     $("editActions").value=(evidence.action_items||[]).map(function(x){return "- "+(x.action||"")+" | Owner: "+(x.owner||"Not explicitly assigned")+" | Deadline: "+(x.deadline||"Not explicitly stated")+" | "+(x.timestamp||"")+"\n  Evidence: "+(x.evidence||"");}).join("\n");
     $("editFollowup").value=(evidence.open_questions||[]).map(function(x){return "- "+x;}).join("\n");
     $("editMom").value="AI UNDERSTANDING SUMMARY\n"+(evidence.summary||"")+"\n\nKEY DISCUSSIONS\n"+(evidence.discussion_points||[]).map(function(x){return "- "+x;}).join("\n")+"\n\nDECISIONS\n"+$("editDecisions").value+"\n\nACTION ITEMS\n"+$("editActions").value+"\n\nPENDING FOLLOW-UP\n"+$("editFollowup").value;
     $("resultsCard").classList.remove("hidden");
-  } catch(e) { console.warn("Results load failed",e); }
+
+    // Locate the processor-generated AI MoM document and any previously saved edited/final documents.
+    if (item.momFolderId) {
+      const docs = await listDriveFiles("'"+item.momFolderId+"' in parents and trashed = false");
+      const aiDoc = docs.find(x => /AI_MOM\.docx$/i.test(x.name));
+      const editedDoc = docs.find(x => /EDITED_MOM\.docx$/i.test(x.name));
+      const finalDoc = docs.find(x => /FINAL_MOM\.docx$/i.test(x.name));
+      const names = getMoMFileNames();
+
+      $("aiDocName").textContent = aiDoc?.name || names.ai;
+      $("editedDocName").textContent = editedDoc?.name || names.edited;
+      $("finalDocName").textContent = finalDoc?.name || names.final;
+
+      setDocumentButton("downloadAiBtn", aiDoc?.id, aiDoc?.name);
+      setDocumentButton("downloadEditedBtn", editedDoc?.id, editedDoc?.name);
+      setDocumentButton("downloadFinalBtn", finalDoc?.id, finalDoc?.name);
+
+      const openDrive = $("openDriveBtn");
+      if (openDrive) {
+        openDrive.disabled = false;
+        openDrive.onclick = function() {
+          window.open("https://drive.google.com/drive/folders/" + item.meetingFolderId, "_blank", "noopener");
+        };
+      }
+    }
+  } catch(e) {
+    console.warn("Results load failed",e);
+  }
 }
+
 
 function toggleEditor(id,buttonId) {
   const el=$(id),btn=$(buttonId); if(!el||!btn)return; el.readOnly=!el.readOnly; btn.textContent=el.readOnly?"EDIT":"DONE";
@@ -1020,6 +1193,7 @@ document.addEventListener("DOMContentLoaded",function(){
   [["editSummaryBtn","editSummary"],["editDecisionsBtn","editDecisions"],["editActionsBtn","editActions"],["editFollowupBtn","editFollowup"],["editMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){toggleEditor(x[1],x[0]);});});
   [["copySummaryBtn","editSummary"],["copyDecisionsBtn","editDecisions"],["copyActionsBtn","editActions"],["copyFollowupBtn","editFollowup"],["copyMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){copyField(x[1]);});});
   [["listenSummaryBtn","editSummary"],["listenDecisionsBtn","editDecisions"],["listenActionsBtn","editActions"],["listenFollowupBtn","editFollowup"],["listenMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){listenField(x[1]);});});
+  $("saveFinalBtn")?.addEventListener("click",saveFinalMom);
   initSpeechButton("titleVoice","title"); initSpeechButton("agendaVoice","agenda");
   updateFilenamePreview(); renderBackgroundProcessing(); initGoogle();
 });
