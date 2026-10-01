@@ -8,37 +8,70 @@
   <title>Meeting MoM</title>
   <style>
     :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111827;background:#f3f4f6}
-    *{box-sizing:border-box} body{margin:0} main{max-width:520px;margin:auto;padding:20px 16px 40px}
+    *{box-sizing:border-box} body{margin:0} main{max-width:560px;margin:auto;padding:20px 16px 40px}
     .card{background:#fff;border-radius:22px;padding:22px;box-shadow:0 8px 30px #00000012;margin-top:16px}
     h1{margin:4px 0 6px;font-size:30px}.muted{color:#6b7280}.status{padding:10px 12px;border-radius:12px;background:#f3f4f6;margin:16px 0;font-size:14px}
-    label{display:block;font-weight:600;margin:14px 0 6px} input{width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field{min-width:0}
+    label{display:block;font-weight:600;margin:14px 0 6px}
+    input,textarea{width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;font-family:inherit}
+    textarea{min-height:90px;resize:vertical}
     button{width:100%;border:0;border-radius:14px;padding:14px 16px;font-size:16px;font-weight:700;cursor:pointer;margin-top:12px}
     .primary{background:#111827;color:white}.secondary{background:#e5e7eb;color:#111827}.danger{background:#b91c1c;color:white}
+    .mini{width:auto;padding:8px 10px;margin:0;font-size:13px}.row{display:flex;gap:8px;align-items:center}.row>*{flex:1}
+    .participant{padding:12px;border:1px solid #e5e7eb;border-radius:14px;margin-top:10px;background:#fafafa}
     #timer{font-size:48px;text-align:center;font-variant-numeric:tabular-nums;margin:18px 0}.hidden{display:none!important}
     .small{font-size:13px}.success{background:#ecfdf5;color:#065f46}.error{background:#fef2f2;color:#991b1b}
+    .progress{height:10px;background:#e5e7eb;border-radius:99px;overflow:hidden;margin-top:10px}.progress>div{height:100%;width:0;background:#111827;transition:width .2s}
+    .filebox{border:2px dashed #d1d5db;border-radius:16px;padding:18px;text-align:center;margin-top:10px}
+    .hint{font-size:12px;color:#6b7280;margin-top:6px}
   </style>
 </head>
 <body>
 <main>
   <div class="card">
     <h1>Meeting MoM</h1>
-    <div class="muted">Record → Drive → AI → Minutes of Meeting</div>
+    <div class="muted">Record / Upload → Drive → AI → Minutes of Meeting</div>
     <div id="status" class="status">Ready to connect Google Drive.</div>
     <button id="connectBtn" class="primary">Continue with Google</button>
   </div>
 
   <div id="meetingCard" class="card hidden">
     <label for="title">Meeting title</label>
-    <input id="title" placeholder="e.g. Weekly Sales Review">
+    <div class="row"><input id="title" placeholder="e.g. Weekly Sales Review"><button id="titleVoice" class="secondary mini" type="button">🎤</button></div>
+
+    <div class="grid">
+      <div class="field"><label for="date">Meeting date</label><input id="date" type="date"></div>
+      <div class="field"><label for="startTime">Start time</label><input id="startTime" type="time"></div>
+      <div class="field"><label for="endTime">End time</label><input id="endTime" type="time"></div>
+      <div class="field"><label for="venue">Venue / Mode</label><input id="venue" placeholder="Office / Online"></div>
+    </div>
+
     <label for="agenda">Agenda</label>
-    <input id="agenda" placeholder="Optional">
+    <div class="row"><textarea id="agenda" placeholder="Meeting agenda"></textarea><button id="agendaVoice" class="secondary mini" type="button">🎤</button></div>
+
+    <label>Participants / Speakers</label>
+    <div id="participants"></div>
+    <button id="addParticipant" class="secondary" type="button">+ Add Participant</button>
+
+    <div class="filebox">
+      <strong>Audio</strong>
+      <div class="hint">Use a recorded file or the native recorder integration.</div>
+      <input id="audioFile" type="file" accept="audio/*" style="margin-top:12px">
+    </div>
+
     <div id="timer">00:00:00</div>
     <button id="startBtn" class="primary">START RECORDING</button>
     <button id="stopBtn" class="danger hidden">STOP & SAVE</button>
-    <div class="status small">Recording will use the native iOS recorder in the production build. This web layer handles meeting details, Drive authorization and processing status.</div>
+
+    <div id="uploadBox" class="hidden">
+      <div id="uploadText" class="status small">Preparing upload...</div>
+      <div class="progress"><div id="uploadProgress"></div></div>
+    </div>
+
+    <div class="status small">Audio files are uploaded to the meeting's <b>AUDIO</b> folder. Voice-to-text for fields is optional and browser-dependent; typing remains the primary input.</div>
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=3"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
