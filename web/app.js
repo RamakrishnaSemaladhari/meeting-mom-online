@@ -26,6 +26,42 @@ function status(message, kind="") {
   el.className = "status " + kind;
 }
 
+const PROCESS_STAGES = ["upload","whisper","translation","ai","mom","complete"];
+const PROCESS_LABELS = {
+  upload: "Audio uploaded to Google Drive",
+  whisper: "Whisper transcription",
+  translation: "English translation",
+  ai: "AI understanding & evidence extraction",
+  mom: "MoM preparation & validation",
+  complete: "Results ready"
+};
+
+function showProcessingUI(stage="upload", percent=10, eta="Calculating…") {
+  const card = $("processingCard");
+  if (!card) return;
+  card.classList.remove("hidden");
+  const index = Math.max(0, PROCESS_STAGES.indexOf(stage));
+  PROCESS_STAGES.forEach((name, i) => {
+    const el = document.querySelector('.stage[data-stage="' + name + '"]');
+    if (!el) return;
+    el.classList.toggle("done", i < index || stage === "complete" && i === index);
+    el.classList.toggle("active", i === index && stage !== "complete");
+  });
+  $("processingFill").style.width = Math.max(0, Math.min(100, percent)) + "%";
+  $("processingPercent").textContent = Math.round(percent) + "%";
+  $("processingStageText").textContent = PROCESS_LABELS[stage] || "Processing...";
+  $("processingEta").textContent = "Time remaining: " + (eta || "—");
+}
+
+function showProcessingStartedUI() {
+  showProcessingUI("upload", 10, "Calculating…");
+}
+
+function showProcessingSummaryHint(text) {
+  const el = $("processingSummaryHint");
+  if (el && text) el.textContent = text;
+}
+
 function todayISO() {
   const d = new Date();
   const local = new Date(d.getTime() - d.getTimezoneOffset()*60000);
@@ -128,6 +164,7 @@ async function retryProcessing() {
     await notifyProcessingStarted();
     if (retryButton) retryButton.classList.add("hidden");
     if ($("uploadText")) $("uploadText").textContent = "Processing started automatically.";
+      showProcessingStartedUI();
     status("Processing started automatically. The existing audio was not uploaded again.", "success");
   } catch (err) {
     if (retryButton) {
@@ -624,6 +661,7 @@ async function stopMeeting() {
     try {
       await notifyProcessingStarted();
       $("uploadText").textContent = "Processing started automatically.";
+      showProcessingStartedUI();
       status("Processing started automatically. You do not need to run GitHub Actions.", "success");
     } catch (triggerErr) {
       ensureRetryButton();
