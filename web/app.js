@@ -291,7 +291,7 @@ $("audioFile").addEventListener("change", async ()=>{
   if (!file) return;
   try {
     await createMeetingWorkspace();
-    status("Meeting workspace ready. Click START RECORDING or upload will occur when the session is saved.", "success");
+    await uploadAudio(file);
   } catch (err) {
     status(err.message, "error");
   }
