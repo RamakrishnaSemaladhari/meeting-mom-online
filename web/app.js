@@ -12,6 +12,11 @@ let meetingRoot = null;
 let meetingFolders = null;
 let audioUploaded = false;
 let retryButton = null;
+let recoveryButton = null;
+let mediaRecorder = null;
+let mediaStream = null;
+let recordedChunks = [];
+let isRecording = false;
 
 const $ = id => document.getElementById(id);
 
@@ -155,9 +160,14 @@ function initGoogle() {
       $("meetingCard").classList.remove("hidden");
       $("date").value = $("date").value || todayISO();
       try {
-        restoreMeetingState();
+        const restored = restoreMeetingState();
         await ensureAppDriveRoot();
-        status("Google Drive connected. Ready.", "success");
+        if (restored) {
+          status("Google Drive connected. Previous meeting restored.", "success");
+        } else {
+          status("Google Drive connected. Ready.", "success");
+          ensureRecoveryButton();
+        }
       } catch (err) {
         status(err.message, "error");
       }
@@ -202,15 +212,151 @@ async function createFolder(name, parentId) {
   return response.json();
 }
 
+async function listDriveFiles(query, fields="files(id,name,mimeType,parents,createdTime,modifiedTime,webViewLink,webContentLink)") {
+  const params = new URLSearchParams({
+    q: query,
+    pageSize: "100",
+    orderBy: "createdTime desc",
+    fields: fields
+  });
+  const response = await driveRequest("https://www.googleapis.com/drive/v3/files?" + params.toString());
+  return (await response.json()).files || [];
+}
+
+async function findExistingAppRoot() {
+  const roots = await listDriveFiles(
+    "name = 'MEETING MOM ONLINE' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+  );
+  return roots[0] || null;
+}
+
 async function ensureAppDriveRoot() {
   const saved = sessionStorage.getItem("meeting_mom_app_root");
   if (saved) {
     meetingRoot = JSON.parse(saved);
     return meetingRoot;
   }
-  meetingRoot = await createFolder("MEETING MOM ONLINE", null);
+  const existing = await findExistingAppRoot();
+  meetingRoot = existing || await createFolder("MEETING MOM ONLINE", null);
   sessionStorage.setItem("meeting_mom_app_root", JSON.stringify(meetingRoot));
   return meetingRoot;
+}
+
+async function recoverLatestMeeting() {
+  await ensureAppDriveRoot();
+  status("Searching Google Drive for the latest Meeting MoM workspace...", "");
+  const meetingFoldersList = await listDriveFiles(
+    "'" + meetingRoot.id + "' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+  );
+
+  for (const meeting of meetingFoldersList) {
+    const children = await listDriveFiles(
+      "'" + meeting.id + "' in parents and trashed = false"
+    );
+    const audio = children.find(x =>
+      x.name === "AUDIO" &&
+      x.mimeType === "application/vnd.google-apps.folder"
+    );
+    if (!audio) continue;
+
+    const audioFiles = await listDriveFiles(
+      "'" + audio.id + "' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
+    );
+    if (!audioFiles.length) continue;
+
+    const subfolders = {};
+    for (const name of ["TRANSCRIPT","TRANSLATION","AI","MOM"]) {
+      subfolders[name] = children.find(x =>
+        x.name === name &&
+        x.mimeType === "application/vnd.google-apps.folder"
+      ) || null;
+    }
+
+    const metadata = children.find(x => x.name === "meeting_metadata.json") || null;
+    let metadataData = {};
+    if (metadata) {
+      try {
+        const response = await driveRequest(
+          "https://www.googleapis.com/drive/v3/files/" + metadata.id + "?alt=media"
+        );
+        metadataData = await response.json();
+      } catch (_) {}
+    }
+
+    meetingFolders = {
+      meeting,
+      audio,
+      transcript: subfolders.TRANSCRIPT,
+      translation: subfolders.TRANSLATION,
+      ai: subfolders.AI,
+      mom: subfolders.MOM,
+      metadata
+    };
+    audioUploaded = true;
+    persistMeetingState();
+
+    if (metadataData.title) $("title").value = metadataData.title;
+    if (metadataData.date) $("date").value = metadataData.date;
+    if (metadataData.start_time) $("startTime").value = metadataData.start_time;
+    if (metadataData.end_time) $("endTime").value = metadataData.end_time;
+    if (metadataData.venue) $("venue").value = metadataData.venue;
+    if (metadataData.agenda) $("agenda").value = metadataData.agenda;
+    if (Array.isArray(metadataData.participants)) {
+      $("participants").innerHTML = "";
+      metadataData.participants.forEach(p => addParticipant(p));
+    }
+    updateFilenamePreview();
+
+    showRecoveredAudio(audioFiles[0]);
+    ensureRetryButton();
+    if (retryButton) retryButton.classList.remove("hidden");
+    status("Previous meeting recovered. Existing audio was not uploaded again.", "success");
+    return meetingFolders;
+  }
+
+  status("No previous Meeting MoM workspace with audio was found.", "error");
+  return null;
+}
+
+function showRecoveredAudio(audioFile) {
+  if (!audioFile) return;
+  const box = $("uploadBox");
+  box.classList.remove("hidden");
+  $("uploadText").innerHTML =
+    'Recovered audio: <b>' + escapeHtml(audioFile.name) + '</b>' +
+    (audioFile.webViewLink
+      ? ' — <a href="' + audioFile.webViewLink + '" target="_blank" rel="noopener">OPEN IN GOOGLE DRIVE</a>'
+      : '');
+  $("uploadProgress").style.width = "100%";
+}
+
+function ensureRecoveryButton() {
+  if (recoveryButton) return;
+  const box = $("uploadBox");
+  if (!box) return;
+  recoveryButton = document.createElement("button");
+  recoveryButton.type = "button";
+  recoveryButton.className = "secondary";
+  recoveryButton.textContent = "RECOVER PREVIOUS MEETING";
+  recoveryButton.style.marginTop = "10px";
+  recoveryButton.addEventListener("click", async () => {
+    recoveryButton.disabled = true;
+    recoveryButton.textContent = "SEARCHING GOOGLE DRIVE...";
+    try {
+      await recoverLatestMeeting();
+      if (!meetingFolders) {
+        recoveryButton.disabled = false;
+        recoveryButton.textContent = "RECOVER PREVIOUS MEETING";
+      } else {
+        recoveryButton.classList.add("hidden");
+      }
+    } catch (err) {
+      recoveryButton.disabled = false;
+      recoveryButton.textContent = "RECOVER PREVIOUS MEETING";
+      status(err.message, "error");
+    }
+  });
+  box.appendChild(recoveryButton);
 }
 
 async function createMeetingWorkspace() {
@@ -358,17 +504,166 @@ function formatTime(ms) {
   return h+":"+m+":"+s;
 }
 
+function getRecordingMimeType() {
+  const choices = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4"
+  ];
+  return choices.find(type => window.MediaRecorder?.isTypeSupported?.(type)) || "";
+}
+
 async function startMeeting() {
+  if (isRecording) return;
   try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("This browser does not support microphone recording. Use Chrome or Edge on HTTPS.");
+    }
     await createMeetingWorkspace();
-    startedAt=Date.now();
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+
+    const mimeType = getRecordingMimeType();
+    mediaRecorder = mimeType
+      ? new MediaRecorder(mediaStream, {mimeType})
+      : new MediaRecorder(mediaStream);
+
+    recordedChunks = [];
+    mediaRecorder.ondataavailable = event => {
+      if (event.data && event.data.size > 0) recordedChunks.push(event.data);
+    };
+
+    mediaRecorder.start(1000);
+    isRecording = true;
+    startedAt = Date.now();
+    $("startTime").value = new Date().toTimeString().slice(0,5);
     $("startBtn").classList.add("hidden");
     $("stopBtn").classList.remove("hidden");
-    timerHandle=setInterval(()=>{$("timer").textContent=formatTime(Date.now()-startedAt)},250);
-    status("Meeting workspace created. Recording session started.", "success");
+    $("timer").textContent = "00:00:00";
+    timerHandle = setInterval(() => {
+      $("timer").textContent = formatTime(Date.now() - startedAt);
+    }, 250);
+    status("Microphone recording started. Noise suppression and echo cancellation are enabled.", "success");
   } catch (err) {
-    status(err.message, "error");
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(track => track.stop());
+      mediaStream = null;
+    }
+    isRecording = false;
+    status(err.message || "Could not start microphone recording.", "error");
   }
+}
+
+function stopRecorderAndBuildFile() {
+  return new Promise((resolve, reject) => {
+    if (!mediaRecorder) {
+      reject(new Error("No active recording was found."));
+      return;
+    }
+
+    mediaRecorder.onstop = () => {
+      try {
+        const mimeType = mediaRecorder.mimeType || "audio/webm";
+        const blob = new Blob(recordedChunks, {type:mimeType});
+        const extension = mimeType.includes("mp4") ? "m4a" : "webm";
+        const date = $("date").value || todayISO();
+        const safeTitle = cleanFilePart($("title").value || "Meeting Recording");
+        const file = new File(
+          [blob],
+          safeTitle + " - " + date + " - Recording." + extension,
+          {type:mimeType}
+        );
+        resolve(file);
+      } catch (err) {
+        reject(err);
+      }
+    };
+
+    mediaRecorder.onerror = event => {
+      reject(event.error || new Error("Browser recording failed."));
+    };
+
+    mediaRecorder.stop();
+  });
+}
+
+async function stopMeeting() {
+  if (!isRecording) {
+    $("timer").textContent = "00:00:00";
+    return;
+  }
+
+  clearInterval(timerHandle);
+  timerHandle = null;
+  isRecording = false;
+
+  try {
+    $("stopBtn").disabled = true;
+    $("stopBtn").textContent = "SAVING...";
+    $("endTime").value = new Date().toTimeString().slice(0,5);
+
+    const file = await stopRecorderAndBuildFile();
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(track => track.stop());
+      mediaStream = null;
+    }
+
+    $("timer").textContent = formatTime(Date.now() - startedAt);
+    await uploadAudio(file);
+    await updateMeetingMetadata();
+
+    $("uploadText").textContent = "Recording uploaded. Starting automatic processing...";
+    status("Recording saved to Google Drive. Starting automatic processing...", "");
+
+    try {
+      await notifyProcessingStarted();
+      $("uploadText").textContent = "Processing started automatically.";
+      status("Processing started automatically. You do not need to run GitHub Actions.", "success");
+    } catch (triggerErr) {
+      ensureRetryButton();
+      if (retryButton) retryButton.classList.remove("hidden");
+      status(triggerErr.message + " Use RETRY AUTOMATIC PROCESSING.", "error");
+    }
+
+    $("stopBtn").classList.add("hidden");
+    $("startBtn").classList.remove("hidden");
+  } catch (err) {
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(track => track.stop());
+      mediaStream = null;
+    }
+    status(err.message, "error");
+    $("stopBtn").classList.remove("hidden");
+  } finally {
+    $("stopBtn").disabled = false;
+    $("stopBtn").textContent = "STOP & SAVE";
+  }
+}
+
+async function updateMeetingMetadata() {
+  if (!meetingFolders?.metadata?.id) return;
+  const metadata = {
+    meeting_id: meetingFolders.meeting.id,
+    title: $("title").value.trim(),
+    date: $("date").value,
+    start_time: $("startTime").value,
+    end_time: $("endTime").value,
+    venue: $("venue").value.trim(),
+    agenda: $("agenda").value.trim(),
+    participants: collectParticipants(),
+    updated_at: new Date().toISOString()
+  };
+  await uploadTextToFile(
+    meetingFolders.metadata.id,
+    JSON.stringify(metadata, null, 2),
+    "application/json"
+  );
 }
 
 async function notifyProcessingStarted() {
@@ -535,6 +830,7 @@ $("audioFile").addEventListener("change", ()=>{
   if (file) status("Audio selected: "+file.name+". Click UPLOAD AUDIO TO GOOGLE DRIVE.", "success");
 });
 $("uploadBtn").addEventListener("click", uploadSelectedAudio);
+ensureRecoveryButton();
 setupVoiceButton("titleVoice","title");
 setupVoiceButton("agendaVoice","agenda");
 $("date").value=todayISO();
