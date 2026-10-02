@@ -7,9 +7,9 @@ from processor.scripts.pipeline.validation import validate
 class OnlinePipelineContractTests(unittest.TestCase):
     def setUp(self):
         self.original = [
-            {"start": 0, "end": 5, "text": "We need to review the renewal backlog."},
-            {"start": 6, "end": 12, "text": "Ravi will prepare the renewal report by Friday."},
-            {"start": 13, "end": 18, "text": "Let us discuss the unresolved two wheeler cases."},
+            {"start": 0, "end": 5, "text": "We need to examine the renewal backlog."},
+            {"start": 6, "end": 12, "text": "Ravi will create the renewal report by Friday."},
+            {"start": 13, "end": 18, "text": "Let us talk about the unresolved two wheeler cases."},
         ]
         self.translation = [
             {"start": 0, "end": 5, "text": "We need to review the renewal backlog."},
