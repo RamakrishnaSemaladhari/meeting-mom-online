@@ -58,7 +58,8 @@ jobs:
           path: |
             whisper.cpp/build/bin/whisper-cli
             whisper.cpp/models/ggml-small-q5_1.bin
-          key: ${{ runner.os }}-whisper-runtime-v7-quality
+            whisper.cpp/models/ggml-silero-v5.1.2.bin
+          key: ${{ runner.os }}-whisper-runtime-v8-vad
 
       - name: Prepare Whisper runtime
         run: |
@@ -84,6 +85,14 @@ jobs:
               https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
           else
             echo "Whisper model already cached."
+          fi
+
+          if [ -s whisper.cpp/models/ggml-silero-v5.1.2.bin ]; then
+            echo "Whisper VAD model already cached."
+          else
+            echo "Downloading Silero VAD model once for the cache..."
+            curl -L --fail --retry 3 -o whisper.cpp/models/ggml-silero-v5.1.2.bin \
+              https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
           fi
 
       - name: Restore AI model cache
@@ -238,7 +247,7 @@ jobs:
           path: |
             whisper.cpp/build/bin/whisper-cli
             whisper.cpp/models/ggml-small-q5_1.bin
-          key: ${{ runner.os }}-whisper-runtime-v7-quality
+          key: ${{ runner.os }}-whisper-runtime-v8-vad
 
       - name: Prepare Whisper runtime
         run: |
@@ -270,7 +279,8 @@ jobs:
 
           test -x whisper.cpp/build/bin/whisper-cli
           test -s whisper.cpp/models/ggml-small-q5_1.bin
-          echo "Whisper runtime ready."
+          test -s whisper.cpp/models/ggml-silero-v5.1.2.bin
+          echo "Whisper runtime + VAD ready."
 
       # Ollama model storage is also cached. The Ollama executable itself is
       # small and is installed quickly; the large model does not need to be
