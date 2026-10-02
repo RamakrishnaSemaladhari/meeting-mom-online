@@ -1,3 +1,6 @@
+const DRIVE_ROOT_ID = "1kfwyuKxXdywPy9jhZjghFI4yGJEwh-Yl";
+const DRIVE_INBOX_ID = "1IfS5M0bvmXYg1Oe_pqg1ZGhx7gHc2ufa";
+
 const CONFIG = {
   clientId: "143751867061-aq2n18bdepa6s23d6mrpufprtd7p87v7.apps.googleusercontent.com",
   driveScope: "https://www.googleapis.com/auth/drive.file",
@@ -561,22 +564,26 @@ async function listDriveFiles(query, fields="files(id,name,mimeType,parents,crea
   return (await response.json()).files || [];
 }
 
-async function findExistingAppRoot() {
-  const roots = await listDriveFiles(
-    "name = 'MEETING MOM ONLINE' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-  );
-  return roots[0] || null;
-}
-
 async function ensureAppDriveRoot() {
-  const saved = sessionStorage.getItem("meeting_mom_app_root");
-  if (saved) {
-    meetingRoot = JSON.parse(saved);
+  // Use the established Meeting MoM workspace by ID.
+  // Do not search by name or create a duplicate root.
+  if (meetingRoot && meetingRoot.id === DRIVE_ROOT_ID) {
     return meetingRoot;
   }
-  const existing = await findExistingAppRoot();
-  meetingRoot = existing || await createFolder("MEETING MOM ONLINE", null);
-  sessionStorage.setItem("meeting_mom_app_root", JSON.stringify(meetingRoot));
+
+  const response = await driveRequest(
+    "https://www.googleapis.com/drive/v3/files/" +
+      DRIVE_ROOT_ID +
+      "?fields=id,name,mimeType,parents"
+  );
+  const root = await response.json();
+
+  if (!root || root.id !== DRIVE_ROOT_ID) {
+    throw new Error("The configured MEETING MOM ONLINE Drive root could not be opened.");
+  }
+
+  meetingRoot = root;
+  sessionStorage.setItem("meeting_mom_app_root", JSON.stringify(root));
   return meetingRoot;
 }
 
@@ -584,7 +591,7 @@ async function recoverLatestMeeting() {
   await ensureAppDriveRoot();
   status("Searching Google Drive for the latest Meeting MoM workspace...", "");
   const meetingFoldersList = await listDriveFiles(
-    "'" + meetingRoot.id + "' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    "'" + DRIVE_INBOX_ID + "' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
   );
 
   for (const meeting of meetingFoldersList) {
@@ -701,7 +708,8 @@ async function createMeetingWorkspace() {
   await ensureAppDriveRoot();
   const title = ($("title").value || "Untitled Meeting").trim().replace(/[\\/:*?"<>|#%{}~&]/g,"_").slice(0,100);
   const stamp = new Date().toISOString().replace(/[-:]/g,"").replace(/\.\d{3}Z$/,"Z");
-  const meetingFolder = await createFolder(stamp+"_"+title, meetingRoot.id);
+  // Meeting workspaces belong under the established INBOX.
+  const meetingFolder = await createFolder(stamp+"_"+title, DRIVE_INBOX_ID);
 
   const names = ["AUDIO","TRANSCRIPT","TRANSLATION","AI","MOM"];
   const folders = {};
