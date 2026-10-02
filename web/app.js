@@ -300,7 +300,8 @@ function persistMeetingState() {
     ai: meetingFolders.ai,
     mom: meetingFolders.mom,
     metadata: meetingFolders.metadata,
-    audioUploaded: !!audioUploaded
+    audioUploaded: !!audioUploaded,
+    audioFile: meetingFolders.audioFile || null
   };
   localStorage.setItem("meeting_mom_active_meeting", JSON.stringify(state));
 }
@@ -866,6 +867,7 @@ async function uploadAudio(file) {
       }
     } else if (response.ok) {
       const uploaded = await response.json();
+      meetingFolders.audioFile = uploaded;
       $("uploadProgress").style.width = "100%";
       $("uploadText").textContent = "Audio uploaded to AUDIO folder.";
       audioUploaded = true;
@@ -1207,6 +1209,7 @@ async function notifyProcessingStarted(snapshot, options) {
         meeting_id: snapshot.meeting.id,
         meeting_folder_id: snapshot.meeting.id,
         audio_folder_id: snapshot.audio.id,
+        audio_file_id: snapshot.audioFile ? snapshot.audioFile.id : "",
         metadata_file_id: snapshot.metadata ? snapshot.metadata.id : ""
       })
     });
