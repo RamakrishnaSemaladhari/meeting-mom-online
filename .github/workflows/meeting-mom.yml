@@ -139,6 +139,21 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: python processor/scripts/test_drive_connection.py
 
+  unit-tests:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: processor/requirements.txt
+      - run: pip install -r processor/requirements.txt
+      - name: Offline pipeline tests
+        run: python -m unittest discover -s processor/tests -v
+
   process-meeting:
     if: github.event_name == 'repository_dispatch'
     runs-on: ubuntu-latest
