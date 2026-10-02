@@ -1,496 +1,288 @@
 #!/usr/bin/env python3
-import io, json, os, re, subprocess, sys, tempfile, textwrap
+"""Meeting MoM online processor.
+
+Stages (each is a separate workflow step; all share ./.meeting_work):
+  init         write QUEUED status
+  whisper      select exact audio -> WAV -> original transcript
+  translation  English translation (then local audio is deleted)
+  ai           staged evidence extraction + Complete Conversation Summary + Executive Summary
+  mom          evidence validation -> DOCX -> upload -> COMPLETED
+  fail         mark FAILED if a workflow step died before the processor could report
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
-from docx import Document
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
-MODEL = "ggml-small-q5_1.bin"
+from pipeline import ai_understanding as ai_mod
+from pipeline.docx_builder import build_mom_doc
+from pipeline.drive_store import DriveStore, select_audio
+from pipeline.errors import STAGE_DEFAULT_CODE, MomError
+from pipeline.status import StatusReporter, now
+from pipeline.validation import validate
+
+WORK = Path(".meeting_work")
 WHISPER = Path("whisper.cpp/build/bin/whisper-cli")
+WHISPER_MODEL = Path("whisper.cpp/models/ggml-small-q5_1.bin")
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+JSON_MIME = "application/json"
+FOLDER_ALIASES = {
+    "TRANSCRIPT": ("TRANSCRIPT", "TRANSCRIPTS"),
+    "TRANSLATION": ("TRANSLATION", "TRANSLATIONS"),
+    "AI": ("AI",),
+    "MOM": ("MOM",),
+}
+
+
+def resolve_folders(store, meeting_folder):
+    existing = {f["name"]: f["id"] for f in store.list_children(meeting_folder, folders=True)}
+    out = {}
+    for key, names in FOLDER_ALIASES.items():
+        found = next((existing[n] for n in names if n in existing), None)
+        if not found:
+            log(f"Creating missing meeting output folder: {key}")
+            found = store.ensure_folder(meeting_folder, key)
+        out[key] = found
+    return out
+
 
 def log(msg):
     print(msg, flush=True)
 
-STATUS_FILE_NAME = "PROCESSING_STATUS.json"
 
-def _status_timestamp():
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+def env(name, default=""):
+    return os.environ.get(name, default).strip()
 
-def update_status(service, meeting_folder, stage, percent, message, status_file_id=None, error=None):
-    payload = {
-        "meeting_id": os.environ.get("MEETING_ID", ""),
-        "stage": stage,
-        "progress_percent": percent,
-        "message": message,
-        "updated_at": _status_timestamp(),
-        "status": "FAILED" if stage == "FAILED" else ("COMPLETED" if stage == "COMPLETED" else "PROCESSING")
-    }
-    if error:
-        payload["error"] = str(error)
-
-    body = json.dumps(payload, ensure_ascii=False, indent=2)
-    if status_file_id:
-        media = MediaIoBaseUpload(io.BytesIO(body.encode("utf-8")), mimetype="application/json", resumable=False)
-        service.files().update(fileId=status_file_id, media_body=media).execute()
-        return status_file_id
-
-    found = service.files().list(
-        q=f"'{meeting_folder}' in parents and name = '{STATUS_FILE_NAME}' and trashed = false",
-        pageSize=1, fields="files(id)"
-    ).execute().get("files", [])
-
-    if found:
-        status_file_id = found[0]["id"]
-        media = MediaIoBaseUpload(io.BytesIO(body.encode("utf-8")), mimetype="application/json", resumable=False)
-        service.files().update(fileId=status_file_id, media_body=media).execute()
-        return status_file_id
-
-    created = service.files().create(
-        body={"name": STATUS_FILE_NAME, "mimeType":"application/json", "parents":[meeting_folder]},
-        media_body=MediaIoBaseUpload(io.BytesIO(body.encode("utf-8")), mimetype="application/json", resumable=False),
-        fields="id"
-    ).execute()
-    return created["id"]
 
 def require_env(name):
-    value = os.environ.get(name)
+    value = env(name)
     if not value:
-        raise RuntimeError(f"Required secret/environment variable is missing: {name}")
+        raise MomError("MOM-002", f"Required environment variable is missing: {name}")
     return value
 
-def drive_service():
-    raw = require_env("GOOGLE_SERVICE_ACCOUNT_JSON")
-    info = json.loads(raw)
-    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-def find_audio(service, audio_folder_id):
-    q = f"'{audio_folder_id}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
-    data = service.files().list(
-        q=q, pageSize=20,
-        fields="files(id,name,mimeType,size,modifiedTime)",
-        orderBy="createdTime desc"
-    ).execute()
-    files = data.get("files", [])
-    if not files:
-        raise RuntimeError("No audio file was found in the meeting AUDIO folder.")
-    return files[0]
-
-def download_file(service, file_id, destination):
-    request = service.files().get_media(fileId=file_id)
-    with open(destination, "wb") as fh:
-        downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-
-def upload_bytes(service, parent_id, name, data, mime):
-    media = MediaFileUpload(str(data), mimetype=mime, resumable=True)
-    meta = {"name": name, "parents": [parent_id]}
-    return service.files().create(body=meta, media_body=media, fields="id,name,webViewLink").execute()
-
-def upload_text(service, parent_id, name, text, mime="text/plain"):
-    path = Path(tempfile.mktemp(prefix="mom_"))
-    path.write_text(text, encoding="utf-8")
-    try:
-        return upload_bytes(service, parent_id, name, path, mime)
-    finally:
-        path.unlink(missing_ok=True)
-
-def run(cmd, cwd=None):
+def run_cmd(cmd, code):
     log("$ " + " ".join(map(str, cmd)))
-    subprocess.run(cmd, cwd=cwd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError:
+        raise MomError(code, f"{cmd[0]} is not installed or not executable.")
+    except subprocess.CalledProcessError as exc:
+        raise MomError(code, f"{Path(str(cmd[0])).name} exited with code {exc.returncode}.")
 
-def whisper_json(audio_wav, output_base, translate=False):
-    cmd = [
-        str(WHISPER), "-m", f"whisper.cpp/models/{MODEL}", "-f", str(audio_wav),
-        "-l", "auto", "-ojf", "-otxt", "-of", str(output_base), "-t", "4"
-    ]
+
+def dump(obj):
+    return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+def paths():
+    WORK.mkdir(exist_ok=True)
+    return {
+        "source": WORK / "source_audio", "wav": WORK / "meeting.wav",
+        "transcript_json": WORK / "transcript.json", "translation_json": WORK / "translation.json",
+        "ai": WORK / "ai_understanding.json", "mom": WORK / "AI_MOM.docx",
+        "warnings": WORK / "audio_warnings.json",
+    }
+
+
+class Ctx:
+    def __init__(self, store, meeting_folder, audio_folder, folders, status):
+        self.store, self.meeting_folder, self.audio_folder = store, meeting_folder, audio_folder
+        self.folders, self.status, self.p = folders, status, paths()
+
+
+def whisper_json(wav, base, translate=False):
+    if not WHISPER.exists():
+        raise MomError("MOM-005", f"Whisper executable not found at {WHISPER}.")
+    if not WHISPER_MODEL.exists() or WHISPER_MODEL.stat().st_size == 0:
+        raise MomError("MOM-006", f"Whisper model not found at {WHISPER_MODEL}.")
+    cmd = [str(WHISPER), "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", "auto", "-ojf",
+           "-of", str(base), "-t", env("WHISPER_THREADS", "4")]
     if translate:
         cmd.append("-tr")
-    run(cmd)
-    json_path = Path(str(output_base) + ".json")
-    txt_path = Path(str(output_base) + ".txt")
-    if not json_path.exists() or not txt_path.exists():
-        raise RuntimeError(f"Whisper did not produce expected output for {output_base}")
-    return json.loads(json_path.read_text(encoding="utf-8")), txt_path.read_text(encoding="utf-8")
+    run_cmd(cmd, "MOM-007" if translate else "MOM-005")
+    out = Path(str(base) + ".json")
+    if not out.exists():
+        raise MomError("MOM-007" if translate else "MOM-005", f"Whisper produced no output for {base}.")
+    return json.loads(out.read_text(encoding="utf-8"))
 
-def timestamped_segments(data):
-    segments = data.get("transcription") or data.get("segments") or []
-    out = []
-    for s in segments:
-        start = s.get("offsets", {}).get("from", s.get("start", 0))
-        end = s.get("offsets", {}).get("to", s.get("end", 0))
-        if isinstance(start, (int, float)) and start > 1000:
-            start = start / 1000
-        if isinstance(end, (int, float)) and end > 1000:
-            end = end / 1000
-        text = (s.get("text") or "").strip()
-        if text:
-            out.append({"start": round(float(start or 0), 2), "end": round(float(end or 0), 2), "text": text})
-    return out
 
-def ollama_request(model, prompt):
-    import urllib.request
-    body = json.dumps({
-        "model": model,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.1},
-        "messages": [
-            {"role":"system","content":"Return strict JSON only. No markdown and no commentary."},
-            {"role":"user","content":prompt}
-        ]
-    }).encode()
-    req = urllib.request.Request(
-        "http://127.0.0.1:11434/api/chat", data=body,
-        headers={"Content-Type":"application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=900) as resp:
-        result = json.loads(resp.read().decode())
-    content = result.get("message", {}).get("content", "")
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        repair_prompt = (
-            "Convert the following model output into valid JSON using exactly these keys: "
-            "summary, discussion_points, decisions, action_items, commitments, open_questions, "
-            "next_meeting, review_flags. Preserve the factual content and do not invent anything. "
-            "Return JSON only.\n\nMODEL OUTPUT:\n" + content
-        )
-        with urllib.request.urlopen(
-            urllib.request.Request(
-                "http://127.0.0.1:11434/api/chat",
-                data=json.dumps({
-                    "model": model,
-                    "stream": False,
-                    "format": "json",
-                    "options": {"temperature": 0},
-                    "messages": [
-                        {"role":"system","content":"Return strict JSON only."},
-                        {"role":"user","content":repair_prompt}
-                    ]
-                }).encode(),
-                headers={"Content-Type":"application/json"}
-            ),
-            timeout=900
-        ) as resp:
-            repaired = json.loads(resp.read().decode())
-        return json.loads(repaired.get("message", {}).get("content", "{}"))
+def timestamped_text(segments):
+    return "\n".join(ai_mod.seg_line(s) for s in segments) + "\n"
 
-def evidence_prompt(metadata, evidence_text):
-    return f"""
-You are the evidence-first meeting understanding engine.
 
-Meeting metadata:
-{json.dumps(metadata, ensure_ascii=False, indent=2)}
+def load_json_local_or_drive(ctx, local, folder, name, required=True):
+    if local.exists():
+        return json.loads(local.read_text(encoding="utf-8"))
+    meta = ctx.store.find_one(ctx.folders[folder], name)
+    if not meta:
+        if required:
+            raise MomError("MOM-002", f"{name} is not available locally or in Drive.")
+        return None
+    data = json.loads(ctx.store.read_bytes(meta["id"]).decode("utf-8"))
+    local.write_text(dump(data), encoding="utf-8")
+    return data
 
-Timestamped transcript:
-{evidence_text}
 
-Return ONLY valid JSON with exactly these keys:
-summary, discussion_points, decisions, action_items, commitments, open_questions, next_meeting, review_flags
+def load_metadata(ctx):
+    meta = ctx.store.find_one(ctx.meeting_folder, "meeting_metadata.json")
+    if not meta:
+        raise MomError("MOM-002", "meeting_metadata.json was not found in the meeting folder.")
+    return json.loads(ctx.store.read_bytes(meta["id"]).decode("utf-8"))
 
-Rules:
-- Never invent facts.
-- Suggestion/possibility is NOT a decision.
-- A discussed date is NOT a deadline unless explicitly committed.
-- If owner is not explicit, use "Not explicitly assigned".
-- If deadline is not explicit, use "Not explicitly stated".
-- Every decision and action_item must contain timestamp and evidence copied/paraphrased from the transcript.
-- Participant metadata must NOT be used as proof of speaker identity.
-- Conflicts or ambiguity must go into review_flags.
-- Preserve explicit commitments and follow-up items.
-- Use concise strings/arrays.
-- action_items objects: action, owner, deadline, timestamp, evidence.
-- decisions objects: decision, timestamp, evidence.
-- commitments objects: commitment, owner, deadline, timestamp, evidence.
-- next_meeting should contain only explicitly stated next-meeting information.
-"""
 
-def ollama_json(transcript, metadata):
-    model = os.environ.get("AI_MODEL", "qwen2.5:1.5b-instruct-q3_K_L")
-    segments = timestamped_segments(transcript)
+def publish_ai_outputs(ctx, ai, validated):
+    s, f = ctx.store, ctx.folders["AI"]
+    evidence = dict(ai, summary=ai.get("executive_summary", ""), validated=validated)
+    s.upsert_text(f, "AI Evidence.json", dump(evidence), JSON_MIME)
+    s.upsert_text(f, "AI Understanding.json", dump(dict(ai, validated=validated)), JSON_MIME)
+    s.upsert_text(f, "Complete Conversation Summary.txt", ai.get("complete_conversation_summary", ""))
+    s.upsert_text(f, "Executive Summary.txt", ai.get("executive_summary", ""))
+
+
+def stage_init(ctx):
+    ctx.status.reset()
+    ctx.status.update("QUEUED", "Processing started on the GitHub runner", 0)
+
+
+def stage_whisper(ctx):
+    st = ctx.status
+    st.update("DOWNLOADING", "Locating meeting audio")
+    audio, warnings = select_audio(ctx.store, ctx.audio_folder, env("AUDIO_FILE_ID"),
+                                   env("STRICT_AUDIO_SELECTION", "false").lower() == "true")
+    for w in warnings:
+        log("WARNING: " + w)
+    ctx.p["warnings"].write_text(dump(warnings), encoding="utf-8")
+    log(f"Downloading meeting audio: {audio.get('name')}")
+    st.update("DOWNLOADING", "Downloading audio from Google Drive", 6)
+    ctx.store.download(audio["id"], ctx.p["source"])
+    st.update("CONVERTING", "Converting audio to 16 kHz mono WAV")
+    run_cmd(["ffmpeg", "-y", "-i", str(ctx.p["source"]), "-ar", "16000", "-ac", "1",
+             "-c:a", "pcm_s16le", str(ctx.p["wav"])], "MOM-004")
+    st.update("TRANSCRIBING", "Transcribing with Whisper")
+    data = whisper_json(ctx.p["wav"], WORK / "transcript")
+    segments = ai_mod.segments_from_whisper(data)
     if not segments:
-        raise RuntimeError("Whisper produced no timestamped transcript segments.")
-
-    lines = [
-        f"[{x['start']:.2f}-{x['end']:.2f}] {x['text']}"
-        for x in segments
-    ]
-    full_text = "\n".join(lines)
-
-    # Keep individual AI requests comfortably below the model context limit.
-    chunk_size = 12000
-    chunks = []
-    current = []
-    current_len = 0
-    for line in lines:
-        if current and current_len + len(line) + 1 > chunk_size:
-            chunks.append("\n".join(current))
-            current = []
-            current_len = 0
-        current.append(line)
-        current_len += len(line) + 1
-    if current:
-        chunks.append("\n".join(current))
-
-    partials = []
-    for index, chunk in enumerate(chunks, start=1):
-        log(f"AI evidence pass {index}/{len(chunks)}...")
-        partials.append(ollama_request(model, evidence_prompt(metadata, chunk)))
-
-    if len(partials) == 1:
-        return partials[0]
-
-    # Consolidate chunk-level evidence. The consolidation input is much smaller
-    # than the original transcript because it contains extracted evidence only.
-    consolidation = f"""
-You are consolidating evidence extracted from {len(partials)} transcript sections of one meeting.
-
-Meeting metadata:
-{json.dumps(metadata, ensure_ascii=False, indent=2)}
-
-Section evidence:
-{json.dumps(partials, ensure_ascii=False, indent=2)}
-
-Return ONLY valid JSON with exactly these keys:
-summary, discussion_points, decisions, action_items, commitments, open_questions, next_meeting, review_flags
-
-Rules:
-- Combine overlapping items without losing explicit evidence.
-- Never invent or strengthen a fact.
-- Preserve timestamps and evidence for every decision/action/commitment.
-- Suggestion/possibility is NOT a decision.
-- A discussed date is NOT a deadline unless explicitly committed.
-- Missing owner -> "Not explicitly assigned".
-- Missing deadline -> "Not explicitly stated".
-- Participant metadata is never proof of speaker identity.
-- Preserve conflicts and uncertainty in review_flags.
-"""
-    log("AI evidence consolidation pass...")
-    return ollama_request(model, consolidation)
+        raise MomError("MOM-005", "Whisper produced no transcript segments (silent or unreadable audio?).")
+    ctx.p["transcript_json"].write_text(dump(data), encoding="utf-8")
+    st.update("TRANSCRIBING", "Saving original transcript", 40)
+    ctx.store.upsert_text(ctx.folders["TRANSCRIPT"], "Original Transcript.txt", timestamped_text(segments))
+    ctx.store.upsert_text(ctx.folders["TRANSCRIPT"], "Transcript.json", dump(data), JSON_MIME)
 
 
-def build_mom_doc(metadata, evidence):
-    doc = Document()
-    doc.add_heading("Minutes of Meeting", level=0)
-    doc.add_paragraph(metadata.get("title") or "Meeting")
-    table = doc.add_table(rows=0, cols=2)
-    for k, label in [
-        ("date","Meeting Date"), ("start_time","Start Time"), ("end_time","End Time"),
-        ("venue","Venue / Mode"), ("agenda","Agenda")
-    ]:
-        row = table.add_row().cells
-        row[0].text = label
-        row[1].text = str(metadata.get(k) or "")
-    doc.add_heading("AI Understanding Summary", level=1)
-    doc.add_paragraph(evidence.get("summary") or "")
-    doc.add_heading("Key Discussions", level=1)
-    for x in evidence.get("discussion_points", []):
-        doc.add_paragraph(str(x), style="List Bullet")
-    doc.add_heading("Decisions", level=1)
-    for x in evidence.get("decisions", []):
-        doc.add_paragraph(
-            f"{x.get('decision','')} — {x.get('timestamp','')} — Evidence: {x.get('evidence','')}",
-            style="List Bullet"
-        )
-    doc.add_heading("Action Items", level=1)
-    for x in evidence.get("action_items", []):
-        doc.add_paragraph(
-            f"Action: {x.get('action','')} | Owner: {x.get('owner','Not explicitly assigned')} | "
-            f"Deadline: {x.get('deadline','Not explicitly stated')} | "
-            f"Timestamp: {x.get('timestamp','')} | Evidence: {x.get('evidence','')}",
-            style="List Bullet"
-        )
-    doc.add_heading("Commitments", level=1)
-    for x in evidence.get("commitments", []):
-        doc.add_paragraph(
-            f"{x.get('commitment','')} | Owner: {x.get('owner','Not explicitly assigned')} | "
-            f"Deadline: {x.get('deadline','Not explicitly stated')} | Timestamp: {x.get('timestamp','')} | "
-            f"Evidence: {x.get('evidence','')}",
-            style="List Bullet"
-        )
-    doc.add_heading("Pending Follow-up", level=1)
-    for x in evidence.get("open_questions", []):
-        doc.add_paragraph(str(x), style="List Bullet")
-    doc.add_heading("Next Meeting", level=1)
-    next_meeting = evidence.get("next_meeting")
-    if isinstance(next_meeting, list):
-        for x in next_meeting:
-            doc.add_paragraph(str(x), style="List Bullet")
-    elif next_meeting:
-        doc.add_paragraph(str(next_meeting))
-    doc.add_heading("Review Flags", level=1)
-    for x in evidence.get("review_flags", []):
-        doc.add_paragraph(str(x), style="List Bullet")
-    return doc
+def stage_translation(ctx):
+    st = ctx.status
+    if not ctx.p["wav"].exists():
+        raise MomError("MOM-007", "WAV audio is missing before the translation stage.")
+    st.update("TRANSLATING", "Translating to English with Whisper")
+    data = whisper_json(ctx.p["wav"], WORK / "translation", translate=True)
+    segments = ai_mod.segments_from_whisper(data)
+    ctx.p["translation_json"].write_text(dump(data), encoding="utf-8")
+    ctx.store.upsert_text(ctx.folders["TRANSLATION"], "English Translation.txt", timestamped_text(segments))
+    ctx.store.upsert_text(ctx.folders["TRANSLATION"], "Translation.json", dump(data), JSON_MIME)
+    for key in ("source", "wav"):
+        ctx.p[key].unlink(missing_ok=True)
 
-def metadata_from_drive(service, meeting_folder):
-    meta_files = service.files().list(
-        q=f"'{meeting_folder}' in parents and name = 'meeting_metadata.json' and trashed = false",
-        pageSize=1, fields="files(id)"
-    ).execute().get("files", [])
-    if not meta_files:
-        raise RuntimeError("meeting_metadata.json was not found.")
-    raw = service.files().get_media(fileId=meta_files[0]["id"]).execute()
-    return json.loads(raw.decode("utf-8"))
 
-def output_folders(service, meeting_folder):
-    children = service.files().list(
-        q=f"'{meeting_folder}' in parents and trashed = false",
-        pageSize=50, fields="files(id,name,mimeType)"
-    ).execute().get("files", [])
+def stage_ai(ctx):
+    st = ctx.status
+    st.update("ANALYZING", "Preparing transcript for AI analysis", 58)
+    metadata = load_metadata(ctx)
+    original = ai_mod.segments_from_whisper(
+        load_json_local_or_drive(ctx, ctx.p["transcript_json"], "TRANSCRIPT", "Transcript.json"))
+    translation_data = load_json_local_or_drive(
+        ctx, ctx.p["translation_json"], "TRANSLATION", "Translation.json", required=False)
+    translation = ai_mod.segments_from_whisper(translation_data) if translation_data else []
+    model = env("AI_MODEL", "qwen2.5:1.5b-instruct-q3_K_L")
+    json_fn, text_fn = ai_mod.make_ollama_fns(model)
+    ai = ai_mod.run_understanding(
+        metadata, original, translation, json_fn, text_fn,
+        max_chars=int(env("AI_CHUNK_CHARS", "6000")),
+        progress=lambda state, msg, pct: st.update(state, msg, pct), model=model)
+    ctx.p["ai"].write_text(dump(ai), encoding="utf-8")
+    st.update("SUMMARIZING", "Saving AI outputs", 85)
+    publish_ai_outputs(ctx, ai, validated=False)
 
-    existing = {
-        x["name"]: x["id"]
-        for x in children
-        if x["mimeType"] == "application/vnd.google-apps.folder"
-    }
 
-    # Older/newer meeting workspaces may use plural TRANSCRIPTS /
-    # TRANSLATIONS names. Internally keep one canonical key.
-    aliases = {
-        "TRANSCRIPT": ("TRANSCRIPT", "TRANSCRIPTS"),
-        "TRANSLATION": ("TRANSLATION", "TRANSLATIONS"),
-        "AI": ("AI",),
-        "MOM": ("MOM",),
-    }
+def stage_mom(ctx):
+    st = ctx.status
+    st.update("GENERATING_MOM", "Validating evidence")
+    metadata = load_metadata(ctx)
+    ai = load_json_local_or_drive(ctx, ctx.p["ai"], "AI", "AI Understanding.json")
+    original = ai_mod.segments_from_whisper(
+        load_json_local_or_drive(ctx, ctx.p["transcript_json"], "TRANSCRIPT", "Transcript.json"))
+    td = load_json_local_or_drive(ctx, ctx.p["translation_json"], "TRANSLATION", "Translation.json", required=False)
+    translation = ai_mod.segments_from_whisper(td) if td else []
+    try:
+        validated, report = validate(ai, original, translation)
+    except Exception as exc:
+        raise MomError("MOM-011", f"Evidence validation failed: {exc}")
+    st.update("GENERATING_MOM", "Building the MoM document", 90)
+    try:
+        build_mom_doc(metadata, validated).save(ctx.p["mom"])
+    except Exception as exc:
+        raise MomError("MOM-012", f"DOCX generation failed: {exc}")
+    st.update("UPLOADING", "Uploading results to Google Drive")
+    publish_ai_outputs(ctx, validated, validated=True)
+    title = metadata.get("title") or "Meeting"
+    docx_name = f"{title} - AI_MOM.docx"
+    ctx.store.upsert_file(ctx.folders["MOM"], docx_name, ctx.p["mom"], DOCX_MIME)
+    warnings = json.loads(ctx.p["warnings"].read_text(encoding="utf-8")) if ctx.p["warnings"].exists() else []
+    ctx.store.upsert_text(ctx.folders["MOM"], "PROCESSING_COMPLETE.json", dump({
+        "meeting_id": env("MEETING_ID"), "status": "complete", "completed_at": now(),
+        "ai_model": validated.get("generated_with", {}).get("ai_model", ""),
+        "outputs": {"mom_docx": docx_name, "executive_summary": True,
+                    "complete_conversation_summary": bool(validated.get("complete_conversation_summary"))},
+        "validation": report, "warnings": warnings}), JSON_MIME)
+    st.update("COMPLETED", "Results are ready in Google Drive", 100)
 
-    result = {}
-    for canonical, names in aliases.items():
-        folder_id = next((existing[name] for name in names if name in existing), None)
 
-        # If a required output folder is missing, create it rather than
-        # failing before audio processing begins.
-        if not folder_id:
-            log(f"Creating missing meeting output folder: {canonical}")
-            created = service.files().create(
-                body={
-                    "name": canonical,
-                    "mimeType": "application/vnd.google-apps.folder",
-                    "parents": [meeting_folder],
-                },
-                fields="id,name"
-            ).execute()
-            folder_id = created["id"]
+def stage_fail(ctx):
+    if ctx.status.data.get("status") in ("FAILED", "COMPLETED"):
+        return
+    ctx.status.fail(env("FAILED_ERROR_CODE", "MOM-003"),
+                    f"Workflow step failed before the processor could report: {env('FAILED_STEP', 'unknown')}")
 
-        result[canonical] = folder_id
 
-    log("Meeting output folders ready: " + ", ".join(
-        f"{name}={folder_id}" for name, folder_id in result.items()
-    ))
-    return result
+STAGES = {"init": stage_init, "whisper": stage_whisper, "translation": stage_translation,
+          "ai": stage_ai, "mom": stage_mom, "fail": stage_fail}
 
-def stage_paths():
-    root = Path(".meeting_work")
-    root.mkdir(exist_ok=True)
-    return {
-        "root": root,
-        "source": root / "source_audio",
-        "wav": root / "meeting.wav",
-        "transcript_json": root / "transcript.json",
-        "transcript_txt": root / "transcript.txt",
-        "translation_json": root / "translation.json",
-        "translation_txt": root / "translation.txt",
-        "evidence": root / "evidence.json",
-        "mom": root / "AI_MOM.docx",
-    }
-
-def stage_download(service, audio_folder_id, paths):
-    audio = find_audio(service, audio_folder_id)
-    log("Downloading meeting audio from Google Drive: " + audio["name"])
-    download_file(service, audio["id"], paths["source"])
-    log("Converting audio to 16 kHz mono WAV...")
-    run(["ffmpeg","-y","-i",str(paths["source"]),"-ar","16000","-ac","1","-c:a","pcm_s16le",str(paths["wav"])])
-
-def stage_whisper(service, audio_folder_id, transcript_folder_id, paths, status_file_id=None, meeting_folder=None):
-    if not paths["wav"].exists():
-        stage_download(service, audio_folder_id, paths)
-    log("Running Whisper transcription...")
-    if status_file_id and meeting_folder:
-        update_status(service, meeting_folder, "TRANSCRIBING", 20, "Whisper transcription is running with 4 CPU threads.", status_file_id)
-    data, text = whisper_json(paths["wav"], paths["root"] / "transcript", translate=False)
-    paths["transcript_json"].write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    paths["transcript_txt"].write_text(text, encoding="utf-8")
-    upload_text(service, transcript_folder_id, "Original Transcript.txt", text)
-    upload_text(service, transcript_folder_id, "Transcript.json", json.dumps(data, ensure_ascii=False, indent=2), "application/json")
-
-def stage_translation(service, translation_folder_id, paths, status_file_id=None, meeting_folder=None):
-    if not paths["wav"].exists():
-        raise RuntimeError("WAV audio is missing before translation stage.")
-    log("Running Whisper English translation...")
-    if status_file_id and meeting_folder:
-        update_status(service, meeting_folder, "TRANSLATING", 35, "English translation is running with 4 CPU threads.", status_file_id)
-    data, text = whisper_json(paths["wav"], paths["root"] / "translation", translate=True)
-    paths["translation_json"].write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    paths["translation_txt"].write_text(text, encoding="utf-8")
-    upload_text(service, translation_folder_id, "English Translation.txt", text)
-    upload_text(service, translation_folder_id, "Translation.json", json.dumps(data, ensure_ascii=False, indent=2), "application/json")
-
-def stage_ai(service, meeting_folder, ai_folder_id, paths):
-    metadata = metadata_from_drive(service, meeting_folder)
-    data = json.loads(paths["transcript_json"].read_text(encoding="utf-8"))
-    log("Running AI understanding and evidence extraction on the GitHub Actions runner...")
-    evidence = ollama_json(data, metadata)
-    paths["evidence"].write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
-    upload_text(service, ai_folder_id, "AI Evidence.json", json.dumps(evidence, ensure_ascii=False, indent=2), "application/json")
-
-def stage_mom(service, meeting_folder, mom_folder_id, paths):
-    metadata = metadata_from_drive(service, meeting_folder)
-    evidence = json.loads(paths["evidence"].read_text(encoding="utf-8"))
-    log("Preparing and validating MoM...")
-    doc = build_mom_doc(metadata, evidence)
-    doc.save(paths["mom"])
-    upload_bytes(service, mom_folder_id, f"{metadata.get('title','Meeting')} - AI_MOM.docx", paths["mom"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    upload_text(service, mom_folder_id, "PROCESSING_COMPLETE.json", json.dumps({
-        "meeting_id": os.environ.get("MEETING_ID",""),
-        "status": "complete"
-    }, indent=2), "application/json")
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices=["whisper","translation","ai","mom","all"], default="all")
+    parser.add_argument("--stage", choices=list(STAGES) + ["all"], default="all")
     args = parser.parse_args()
-
-    meeting_folder = require_env("MEETING_FOLDER_ID")
-    audio_folder = require_env("AUDIO_FOLDER_ID")
-    service = drive_service()
-    status_file_id = update_status(service, meeting_folder, "QUEUED", 5, "Processor started. Waiting for processing stage.", None)
+    current = args.stage
+    status = None
     try:
-        folders = output_folders(service, meeting_folder)
-        paths = stage_paths()
-
-        if args.stage in ("whisper","all"):
-            update_status(service, meeting_folder, "DOWNLOADING", 10, "Downloading meeting audio from Google Drive.", status_file_id)
-            stage_whisper(service, audio_folder, folders["TRANSCRIPT"], paths, status_file_id, meeting_folder)
-        if args.stage in ("translation","all"):
-            update_status(service, meeting_folder, "TRANSLATING", 35, "Transcribing and translating to English.", status_file_id)
-            stage_translation(service, folders["TRANSLATION"], paths, status_file_id, meeting_folder)
-        if args.stage in ("ai","all"):
-            update_status(service, meeting_folder, "ANALYZING", 60, "AI understanding and evidence extraction.", status_file_id)
-            stage_ai(service, meeting_folder, folders["AI"], paths)
-        if args.stage in ("mom","all"):
-            update_status(service, meeting_folder, "GENERATING_MOM", 82, "Preparing and validating the Minutes of Meeting.", status_file_id)
-            stage_mom(service, meeting_folder, folders["MOM"], paths)
-
-        update_status(service, meeting_folder, "COMPLETED", 100, "Meeting transcript, translation, AI understanding and MoM are ready.", status_file_id)
-        log("STAGE COMPLETE: " + args.stage)
+        meeting_folder = require_env("MEETING_FOLDER_ID")
+        audio_folder = require_env("AUDIO_FOLDER_ID")
+        store = DriveStore.from_env()
+        folders = resolve_folders(store, meeting_folder)
+        paths()
+        status = StatusReporter(store, meeting_folder, env("MEETING_ID"), WORK / "status.json", current)
+        ctx = Ctx(store, meeting_folder, audio_folder, folders, status)
+        order = ["whisper", "translation", "ai", "mom"] if args.stage == "all" else [args.stage]
+        for name in order:
+            current = status.stage = name
+            STAGES[name](ctx)
+            log("STAGE COMPLETE: " + name)
+    except MomError as exc:
+        log(f"PROCESSING FAILED {exc}")
+        if status:
+            status.fail(exc.code, exc.message)
+        sys.exit(1)
     except Exception as exc:
-        try:
-            update_status(service, meeting_folder, "FAILED", 100, "Processing failed.", status_file_id, exc)
-        except Exception:
-            pass
-        raise
+        code = STAGE_DEFAULT_CODE.get(current, "MOM-003")
+        log(f"PROCESSING FAILED [{code}] {type(exc).__name__}: {exc}")
+        if status:
+            status.fail(code, f"{type(exc).__name__}: {exc}")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        log("PROCESSING FAILED: " + str(exc))
-        raise
+    main()
