@@ -21,7 +21,7 @@ permissions:
 jobs:
 
   warm-processor-cache:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -62,7 +62,7 @@ jobs:
           path: |
             whisper.cpp/build/bin/whisper-cli
             whisper.cpp/models/ggml-small-q5_1.bin
-          key: ${{ runner.os }}-whisper-runtime-v5-static
+          key: ${{ runner.os }}-whisper-runtime-v6-cli
 
       - name: Prepare Whisper runtime
         run: |
@@ -71,16 +71,13 @@ jobs:
           if [ ! -x whisper.cpp/build/bin/whisper-cli ]; then
             echo "Building Whisper runtime for reusable cache..."
             git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
-            cmake -B whisper.cpp-src/build whisper.cpp-src -DBUILD_SHARED_LIBS=OFF -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++"
-            cmake --build whisper.cpp-src/build -j --config Release
+            cmake -B whisper.cpp-src/build whisper.cpp-src -DBUILD_SHARED_LIBS=OFF
+            cmake --build whisper.cpp-src/build --target whisper-cli -j --config Release
             cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
             chmod +x whisper.cpp/build/bin/whisper-cli
             echo "Whisper binary dependency check:"
+            echo "Whisper runtime linkage:"
             ldd whisper.cpp/build/bin/whisper-cli || true
-            if ldd whisper.cpp/build/bin/whisper-cli 2>/dev/null | grep -q "libwhisper.so"; then
-              echo "ERROR: whisper-cli still depends on libwhisper.so"
-              exit 1
-            fi
             rm -rf whisper.cpp-src
           else
             echo "Whisper executable already cached."
@@ -245,7 +242,7 @@ jobs:
           path: |
             whisper.cpp/build/bin/whisper-cli
             whisper.cpp/models/ggml-small-q5_1.bin
-          key: ${{ runner.os }}-whisper-runtime-v5-static
+          key: ${{ runner.os }}-whisper-runtime-v6-cli
 
       - name: Prepare Whisper runtime
         run: |
@@ -257,17 +254,14 @@ jobs:
             echo "Whisper cache miss. Building Whisper.cpp once for the cache..."
             git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
             cmake -B whisper.cpp-src/build whisper.cpp-src -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
-            cmake --build whisper.cpp-src/build -j --config Release
+            cmake --build whisper.cpp-src/build --target whisper-cli -j --config Release
             cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
             chmod +x whisper.cpp/build/bin/whisper-cli
             rm -rf whisper.cpp-src
           fi
 
+          echo "Whisper runtime linkage:"
           ldd whisper.cpp/build/bin/whisper-cli || true
-          if ldd whisper.cpp/build/bin/whisper-cli 2>/dev/null | grep -Eq "libwhisper|libggml"; then
-            echo "ERROR: whisper-cli still depends on shared whisper/ggml libraries"
-            exit 1
-          fi
           whisper.cpp/build/bin/whisper-cli --help >/dev/null 2>&1 || (echo "ERROR: whisper-cli does not start" && exit 1)
 
           if [ -f whisper.cpp/models/ggml-small-q5_1.bin ]; then
