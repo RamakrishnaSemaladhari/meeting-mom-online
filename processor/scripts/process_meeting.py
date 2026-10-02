@@ -12,6 +12,7 @@ Stages (each is a separate workflow step; all share ./.meeting_work):
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -100,15 +101,77 @@ def whisper_json(wav, base, translate=False):
         raise MomError("MOM-005", f"Whisper executable not found at {WHISPER}.")
     if not WHISPER_MODEL.exists() or WHISPER_MODEL.stat().st_size == 0:
         raise MomError("MOM-006", f"Whisper model not found at {WHISPER_MODEL}.")
-    cmd = [str(WHISPER), "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", "auto", "-ojf",
-           "-of", str(base), "-t", env("WHISPER_THREADS", "4")]
+
+    # Reduce cross-window repetition/hallucination on long or noisy recordings.
+    cmd = [
+        str(WHISPER), "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", "auto",
+        "-ojf", "-of", str(base), "-t", env("WHISPER_THREADS", "4"),
+        "-mc", "0", "-sns", "-nth", env("WHISPER_NO_SPEECH_THRESHOLD", "0.60"),
+    ]
     if translate:
         cmd.append("-tr")
     run_cmd(cmd, "MOM-007" if translate else "MOM-005")
     out = Path(str(base) + ".json")
     if not out.exists():
         raise MomError("MOM-007" if translate else "MOM-005", f"Whisper produced no output for {base}.")
-    return json.loads(out.read_text(encoding="utf-8"))
+
+    raw = out.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+        log("WARNING: Whisper JSON contained invalid UTF-8; replacement characters were inserted.")
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise MomError("MOM-005", f"Whisper JSON is malformed: {exc}") from exc
+
+    data["_decoder_diagnostics"] = {
+        "invalid_utf8_replacements": text.count("\ufffd"),
+        "json_bytes": len(raw),
+    }
+    return data
+
+
+def validate_transcript_quality(segments, diagnostics=None):
+    diagnostics = diagnostics or {}
+    texts = [str(s.get("text", "")).strip() for s in segments if str(s.get("text", "")).strip()]
+    joined = " ".join(texts)
+    compact = re.sub(r"\s+", " ", joined).strip()
+    tokens = compact.lower().split()
+
+    if len(compact) < 20:
+        raise MomError("MOM-008", "Transcript quality check failed: less than 20 characters of usable speech were detected.")
+
+    unique_ratio = len(set(tokens)) / max(1, len(tokens))
+    repeated_segment_ratio = 0.0
+    if len(texts) >= 4:
+        normalized = [re.sub(r"\W+", "", t.lower()) for t in texts]
+        counts = {}
+        for item in normalized:
+            if item:
+                counts[item] = counts.get(item, 0) + 1
+        repeated_segment_ratio = max(counts.values(), default=0) / max(1, len(normalized))
+
+    replacement_count = int(diagnostics.get("invalid_utf8_replacements", 0))
+    if len(tokens) >= 40 and (unique_ratio < 0.08 or repeated_segment_ratio >= 0.75):
+        raise MomError(
+            "MOM-008",
+            "Transcript quality check failed: Whisper produced highly repetitive text, "
+            "which is consistent with silence/noise or transcription hallucination. "
+            "Please verify the recording contains clear speech and try again."
+        )
+    if replacement_count > max(10, len(compact) // 200):
+        raise MomError("MOM-008", "Transcript quality check failed: the Whisper output contained too many invalid characters.")
+
+    return {
+        "usable_characters": len(compact),
+        "token_count": len(tokens),
+        "unique_token_ratio": round(unique_ratio, 4),
+        "repeated_segment_ratio": round(repeated_segment_ratio, 4),
+        "invalid_utf8_replacements": replacement_count,
+    }
 
 
 def timestamped_text(segments):
@@ -168,6 +231,7 @@ def stage_whisper(ctx):
     segments = ai_mod.segments_from_whisper(data)
     if not segments:
         raise MomError("MOM-005", "Whisper produced no transcript segments (silent or unreadable audio?).")
+    data["_quality"] = validate_transcript_quality(segments, data.get("_decoder_diagnostics"))
     ctx.p["transcript_json"].write_text(dump(data), encoding="utf-8")
     st.update("TRANSCRIBING", "Saving original transcript", 40)
     ctx.store.upsert_text(ctx.folders["TRANSCRIPT"], "Original Transcript.txt", timestamped_text(segments))
@@ -181,6 +245,8 @@ def stage_translation(ctx):
     st.update("TRANSLATING", "Translating to English with Whisper")
     data = whisper_json(ctx.p["wav"], WORK / "translation", translate=True)
     segments = ai_mod.segments_from_whisper(data)
+    if segments:
+        data["_quality"] = validate_transcript_quality(segments, data.get("_decoder_diagnostics"))
     ctx.p["translation_json"].write_text(dump(data), encoding="utf-8")
     ctx.store.upsert_text(ctx.folders["TRANSLATION"], "English Translation.txt", timestamped_text(segments))
     ctx.store.upsert_text(ctx.folders["TRANSLATION"], "Translation.json", dump(data), JSON_MIME)
