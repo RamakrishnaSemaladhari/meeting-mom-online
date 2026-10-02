@@ -1089,6 +1089,87 @@ async function uploadSelectedAudio() {
 }
 
 
+async function createInitialProcessingStatus(snapshot) {
+  const existing = await listDriveFiles(
+    "'" + snapshot.meeting.id + "' in parents and name = 'PROCESSING_STATUS.json' and trashed = false",
+    "files(id,name,mimeType,modifiedTime)"
+  );
+  const payload = JSON.stringify({
+    meeting_id: snapshot.meeting.id,
+    stage: "QUEUED",
+    progress_percent: 5,
+    message: "Processing request sent. Waiting for GitHub Actions to begin.",
+    status: "PROCESSING",
+    updated_at: new Date().toISOString()
+  }, null, 2);
+
+  if (existing[0]) {
+    await uploadTextToFile(existing[0].id, payload, "application/json");
+    return existing[0].id;
+  }
+
+  const response = await driveRequest("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({
+      name: "PROCESSING_STATUS.json",
+      mimeType: "application/json",
+      parents: [snapshot.meeting.id]
+    })
+  });
+  const file = await response.json();
+  await uploadTextToFile(file.id, payload, "application/json");
+  return file.id;
+}
+
+async function readProcessingStatus(item) {
+  if (!item || !item.meetingFolderId) return null;
+  try {
+    const files = await listDriveFiles(
+      "'" + item.meetingFolderId + "' in parents and name = 'PROCESSING_STATUS.json' and trashed = false",
+      "files(id,name,modifiedTime)"
+    );
+    if (!files[0]) return null;
+    const response = await driveRequest(
+      "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(files[0].id) + "?alt=media"
+    );
+    return await response.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+async function monitorDriveProcessingStatus(item) {
+  if (!item || item.stage === "complete" || item.stage === "failed") return;
+  const data = await readProcessingStatus(item);
+  if (data) {
+    const pct = Number(data.progress_percent || 5);
+    const stage = String(data.stage || "QUEUED").toLowerCase();
+    updateBackgroundProcessing(item.id, {
+      stage: stage === "completed" ? "complete" : stage === "failed" ? "failed" : stage,
+      percent: pct,
+      statusText: data.message || "Processing"
+    });
+
+    if (meetingFolders?.meeting?.id === item.id) {
+      const card = $("processingCard");
+      if (card) card.classList.remove("hidden");
+      if ($("processingFill")) $("processingFill").style.width = pct + "%";
+      if ($("processingPercent")) $("processingPercent").textContent = pct + "%";
+      if ($("processingStageText")) $("processingStageText").textContent = data.message || "Processing";
+      if ($("processingStageEta")) $("processingStageEta").textContent =
+        data.stage === "COMPLETED" ? "Stage remaining: None" : "Stage remaining: In progress…";
+      if ($("processingTotalEta")) $("processingTotalEta").textContent =
+        data.stage === "COMPLETED" ? "Total estimated remaining: 0 minutes" : "Total estimated remaining: Updating…";
+      if (data.stage === "COMPLETED") {
+        if ($("processingSummaryHint")) $("processingSummaryHint").textContent = "Results are ready in Google Drive.";
+        return;
+      }
+    }
+  }
+  setTimeout(function(){ monitorDriveProcessingStatus(item); }, 4000);
+}
+
 async function notifyProcessingStarted(snapshot, options) {
   options = options || {};
   snapshot = snapshot || meetingFolders;
@@ -1097,6 +1178,17 @@ async function notifyProcessingStarted(snapshot, options) {
   }
 
   const requestStarted = new Date().toISOString();
+
+  // Show the live timeline immediately, including when this is a background retry.
+  showRecoveredProcessingUI(
+    "Processing request sent. Waiting for GitHub Actions to begin."
+  );
+
+  try {
+    await createInitialProcessingStatus(snapshot);
+  } catch (_) {
+    // Processor status updates remain authoritative if initial status creation fails.
+  }
 
   // Google Apps Script ContentService responses are redirected to
   // script.googleusercontent.com. A browser fetch that tries to read the
@@ -1133,11 +1225,9 @@ async function notifyProcessingStarted(snapshot, options) {
       $("uploadText").textContent =
         "Processing request sent. Existing audio will not be uploaded again.";
     }
-
-    showRecoveredProcessingUI(
-      "Processing request sent. Waiting for GitHub Actions to begin."
-    );
   }
+
+  monitorDriveProcessingStatus(item);
 
   setTimeout(function() {
     findAndMonitorLatestRun(item, requestStarted);
