@@ -1141,14 +1141,26 @@ async function readProcessingStatus(item) {
   }
 }
 
+function driveStageToUi(stage) {
+  const s = String(stage || "").toUpperCase();
+  if (s === "COMPLETED") return "complete";
+  if (s === "FAILED") return "checking";
+  if (s === "ANALYZING" || s === "SUMMARIZING") return "ai";
+  if (s === "GENERATING_MOM" || s === "UPLOADING") return "mom";
+  if (s === "TRANSLATING") return "translation";
+  if (s === "TRANSCRIBING" || s === "CONVERTING") return "whisper";
+  return "checking";
+}
+
 async function monitorDriveProcessingStatus(item) {
   if (!item || item.stage === "complete" || item.stage === "failed") return;
   const data = await readProcessingStatus(item);
   if (data) {
     const pct = Number(data.progress_percent || 5);
-    const stage = String(data.stage || "QUEUED").toLowerCase();
+    const rawStage = String(data.stage || "QUEUED").toUpperCase();
+    const stage = rawStage === "COMPLETED" ? "complete" : rawStage === "FAILED" ? "failed" : rawStage.toLowerCase();
     updateBackgroundProcessing(item.id, {
-      stage: stage === "completed" ? "complete" : stage === "failed" ? "failed" : stage,
+      stage: stage,
       percent: pct,
       statusText: data.message || "Processing"
     });
@@ -1156,14 +1168,27 @@ async function monitorDriveProcessingStatus(item) {
     if (meetingFolders?.meeting?.id === item.id) {
       const card = $("processingCard");
       if (card) card.classList.remove("hidden");
-      if ($("processingFill")) $("processingFill").style.width = pct + "%";
-      if ($("processingPercent")) $("processingPercent").textContent = pct + "%";
-      if ($("processingStageText")) $("processingStageText").textContent = data.message || "Processing";
-      if ($("processingStageEta")) $("processingStageEta").textContent =
-        data.stage === "COMPLETED" ? "Stage remaining: None" : "Stage remaining: In progress…";
-      if ($("processingTotalEta")) $("processingTotalEta").textContent =
-        data.stage === "COMPLETED" ? "Total estimated remaining: 0 minutes" : "Total estimated remaining: Updating…";
-      if (data.stage === "COMPLETED") {
+      if (rawStage === "FAILED") {
+        if ($("processingFill")) $("processingFill").style.width = pct + "%";
+        if ($("processingPercent")) $("processingPercent").textContent = pct + "%";
+        if ($("processingStageText")) $("processingStageText").textContent = data.message || "Processing failed";
+        if ($("processingStageEta")) $("processingStageEta").textContent = "Stage remaining: Processing stopped";
+        if ($("processingTotalEta")) $("processingTotalEta").textContent = "Total estimated remaining: —";
+        if ($("processingSummaryHint")) $("processingSummaryHint").textContent =
+          data.error_message ? (data.error_code + ": " + data.error_message) : "Processing failed. You can restart without uploading the audio again.";
+      } else {
+        const uiStage = driveStageToUi(rawStage);
+        const stageLabel = PROCESS_LABELS[uiStage] || data.message || "Processing";
+        showProcessingUI(
+          uiStage,
+          pct,
+          rawStage === "COMPLETED" ? "None" : "In progress…",
+          rawStage === "COMPLETED" ? "0 minutes" : "Updating…"
+        );
+        if ($("processingStageText")) $("processingStageText").textContent = data.message || stageLabel;
+      }
+
+      if (rawStage === "COMPLETED") {
         if ($("processingSummaryHint")) $("processingSummaryHint").textContent = "Results are ready in Google Drive.";
         return;
       }
