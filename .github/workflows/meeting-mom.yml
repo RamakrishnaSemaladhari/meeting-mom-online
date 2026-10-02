@@ -273,6 +273,13 @@ jobs:
 
           echo "AI engine ready."
 
+      - name: Diagnose Google Drive meeting access
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
+          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
+        run: python processor/scripts/test_drive_connection.py
+
       - name: Whisper transcription
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
