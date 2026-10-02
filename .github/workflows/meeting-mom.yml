@@ -6,9 +6,14 @@ on:
     paths:
       - ".github/workflows/meeting-mom.yml"
       - "processor/**"
+      - "processor/tests/**"
   workflow_dispatch:
   repository_dispatch:
     types: [meeting-ready]
+
+concurrency:
+  group: meeting-mom-${{ github.event.client_payload.meeting_id || github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -358,5 +363,40 @@ jobs:
           FAILED_ERROR_CODE: MOM-003
         run: python processor/scripts/process_meeting.py --stage fail
 
+      - name: Verify local output contract
+        run: |
+          test -f .meeting_work/transcript.json
+          test -f .meeting_work/translation.json
+          test -f .meeting_work/ai_understanding.json
+          test -f .meeting_work/AI_MOM.docx
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          ai = json.loads(Path(".meeting_work/ai_understanding.json").read_text(encoding="utf-8"))
+          required = [
+              "executive_summary",
+              "complete_conversation_summary",
+              "discussion_points",
+              "decisions",
+              "action_items",
+              "commitments",
+              "open_questions",
+              "next_meeting",
+              "review_flags",
+          ]
+          missing = [k for k in required if k not in ai]
+          if missing:
+              raise SystemExit("Missing AI output fields: " + ", ".join(missing))
+          print("ONLINE OUTPUT CONTRACT: PASS")
+          PY
+
       - name: Results ready
         run: echo "Meeting transcript, translation, AI evidence and MoM are ready in Google Drive."
+
+      - name: Cleanup temporary meeting data
+        if: always()
+        run: |
+          echo "Cleaning ephemeral meeting workspace..."
+          rm -rf .meeting_work
+          test ! -e .meeting_work
+          echo "Temporary meeting workspace removed."
