@@ -4,7 +4,7 @@ from pathlib import Path
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
 from docx import Document
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
@@ -13,6 +13,48 @@ WHISPER = Path("whisper.cpp/build/bin/whisper-cli")
 
 def log(msg):
     print(msg, flush=True)
+
+STATUS_FILE_NAME = "PROCESSING_STATUS.json"
+
+def _status_timestamp():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+def update_status(service, meeting_folder, stage, percent, message, status_file_id=None, error=None):
+    payload = {
+        "meeting_id": os.environ.get("MEETING_ID", ""),
+        "stage": stage,
+        "progress_percent": percent,
+        "message": message,
+        "updated_at": _status_timestamp(),
+        "status": "FAILED" if stage == "FAILED" else ("COMPLETED" if stage == "COMPLETED" else "PROCESSING")
+    }
+    if error:
+        payload["error"] = str(error)
+
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    if status_file_id:
+        media = MediaIoBaseUpload(io.BytesIO(body.encode("utf-8")), mimetype="application/json", resumable=False)
+        service.files().update(fileId=status_file_id, media_body=media).execute()
+        return status_file_id
+
+    found = service.files().list(
+        q=f"'{meeting_folder}' in parents and name = '{STATUS_FILE_NAME}' and trashed = false",
+        pageSize=1, fields="files(id)"
+    ).execute().get("files", [])
+
+    if found:
+        status_file_id = found[0]["id"]
+        media = MediaIoBaseUpload(io.BytesIO(body.encode("utf-8")), mimetype="application/json", resumable=False)
+        service.files().update(fileId=status_file_id, media_body=media).execute()
+        return status_file_id
+
+    created = service.files().create(
+        body={"name": STATUS_FILE_NAME, "mimeType":"application/json", "parents":[meeting_folder]},
+        media_body=MediaIoBaseUpload(io.BytesIO(body.encode("utf-8")), mimetype="application/json", resumable=False),
+        fields="id"
+    ).execute()
+    return created["id"]
 
 def require_env(name):
     value = os.environ.get(name)
@@ -415,19 +457,32 @@ def main():
     meeting_folder = require_env("MEETING_FOLDER_ID")
     audio_folder = require_env("AUDIO_FOLDER_ID")
     service = drive_service()
-    folders = output_folders(service, meeting_folder)
-    paths = stage_paths()
+    status_file_id = update_status(service, meeting_folder, "QUEUED", 5, "Processor started. Waiting for processing stage.", None)
+    try:
+        folders = output_folders(service, meeting_folder)
+        paths = stage_paths()
 
-    if args.stage in ("whisper","all"):
-        stage_whisper(service, audio_folder, folders["TRANSCRIPT"], paths)
-    if args.stage in ("translation","all"):
-        stage_translation(service, folders["TRANSLATION"], paths)
-    if args.stage in ("ai","all"):
-        stage_ai(service, meeting_folder, folders["AI"], paths)
-    if args.stage in ("mom","all"):
-        stage_mom(service, meeting_folder, folders["MOM"], paths)
+        if args.stage in ("whisper","all"):
+            update_status(service, meeting_folder, "DOWNLOADING", 10, "Downloading meeting audio from Google Drive.", status_file_id)
+            stage_whisper(service, audio_folder, folders["TRANSCRIPT"], paths)
+        if args.stage in ("translation","all"):
+            update_status(service, meeting_folder, "TRANSLATING", 35, "Transcribing and translating to English.", status_file_id)
+            stage_translation(service, folders["TRANSLATION"], paths)
+        if args.stage in ("ai","all"):
+            update_status(service, meeting_folder, "ANALYZING", 60, "AI understanding and evidence extraction.", status_file_id)
+            stage_ai(service, meeting_folder, folders["AI"], paths)
+        if args.stage in ("mom","all"):
+            update_status(service, meeting_folder, "GENERATING_MOM", 82, "Preparing and validating the Minutes of Meeting.", status_file_id)
+            stage_mom(service, meeting_folder, folders["MOM"], paths)
 
-    log("STAGE COMPLETE: " + args.stage)
+        update_status(service, meeting_folder, "COMPLETED", 100, "Meeting transcript, translation, AI understanding and MoM are ready.", status_file_id)
+        log("STAGE COMPLETE: " + args.stage)
+    except Exception as exc:
+        try:
+            update_status(service, meeting_folder, "FAILED", 100, "Processing failed.", status_file_id, exc)
+        except Exception:
+            pass
+        raise
 
 if __name__ == "__main__":
     try:
