@@ -408,20 +408,24 @@ def stage_download(service, audio_folder_id, paths):
     log("Converting audio to 16 kHz mono WAV...")
     run(["ffmpeg","-y","-i",str(paths["source"]),"-ar","16000","-ac","1","-c:a","pcm_s16le",str(paths["wav"])])
 
-def stage_whisper(service, audio_folder_id, transcript_folder_id, paths):
+def stage_whisper(service, audio_folder_id, transcript_folder_id, paths, status_file_id=None, meeting_folder=None):
     if not paths["wav"].exists():
         stage_download(service, audio_folder_id, paths)
     log("Running Whisper transcription...")
+    if status_file_id and meeting_folder:
+        update_status(service, meeting_folder, "TRANSCRIBING", 20, "Whisper transcription is running with 4 CPU threads.", status_file_id)
     data, text = whisper_json(paths["wav"], paths["root"] / "transcript", translate=False)
     paths["transcript_json"].write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     paths["transcript_txt"].write_text(text, encoding="utf-8")
     upload_text(service, transcript_folder_id, "Original Transcript.txt", text)
     upload_text(service, transcript_folder_id, "Transcript.json", json.dumps(data, ensure_ascii=False, indent=2), "application/json")
 
-def stage_translation(service, translation_folder_id, paths):
+def stage_translation(service, translation_folder_id, paths, status_file_id=None, meeting_folder=None):
     if not paths["wav"].exists():
         raise RuntimeError("WAV audio is missing before translation stage.")
     log("Running Whisper English translation...")
+    if status_file_id and meeting_folder:
+        update_status(service, meeting_folder, "TRANSLATING", 35, "English translation is running with 4 CPU threads.", status_file_id)
     data, text = whisper_json(paths["wav"], paths["root"] / "translation", translate=True)
     paths["translation_json"].write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     paths["translation_txt"].write_text(text, encoding="utf-8")
@@ -464,10 +468,10 @@ def main():
 
         if args.stage in ("whisper","all"):
             update_status(service, meeting_folder, "DOWNLOADING", 10, "Downloading meeting audio from Google Drive.", status_file_id)
-            stage_whisper(service, audio_folder, folders["TRANSCRIPT"], paths)
+            stage_whisper(service, audio_folder, folders["TRANSCRIPT"], paths, status_file_id, meeting_folder)
         if args.stage in ("translation","all"):
             update_status(service, meeting_folder, "TRANSLATING", 35, "Transcribing and translating to English.", status_file_id)
-            stage_translation(service, folders["TRANSLATION"], paths)
+            stage_translation(service, folders["TRANSLATION"], paths, status_file_id, meeting_folder)
         if args.stage in ("ai","all"):
             update_status(service, meeting_folder, "ANALYZING", 60, "AI understanding and evidence extraction.", status_file_id)
             stage_ai(service, meeting_folder, folders["AI"], paths)
