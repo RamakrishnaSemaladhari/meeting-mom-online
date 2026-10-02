@@ -28,7 +28,8 @@ from pipeline.validation import validate
 
 WORK = Path(".meeting_work")
 WHISPER = Path("whisper.cpp/build/bin/whisper-cli")
-WHISPER_MODEL = Path("whisper.cpp/models/ggml-small-q5_1.bin")
+WHISPER_MODEL = Path(os.environ.get("WHISPER_MODEL_PATH", "whisper.cpp/models/ggml-small-q5_1.bin"))
+VAD_MODEL = Path(os.environ.get("WHISPER_VAD_MODEL_PATH", "whisper.cpp/models/ggml-silero-v5.1.2.bin"))
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 JSON_MIME = "application/json"
 FOLDER_ALIASES = {
@@ -101,12 +102,22 @@ def whisper_json(wav, base, translate=False):
         raise MomError("MOM-005", f"Whisper executable not found at {WHISPER}.")
     if not WHISPER_MODEL.exists() or WHISPER_MODEL.stat().st_size == 0:
         raise MomError("MOM-006", f"Whisper model not found at {WHISPER_MODEL}.")
+    if not VAD_MODEL.exists() or VAD_MODEL.stat().st_size == 0:
+        raise MomError("MOM-006", f"Whisper VAD model not found at {VAD_MODEL}.")
 
     # Reduce cross-window repetition/hallucination on long or noisy recordings.
     cmd = [
         str(WHISPER), "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", "auto",
         "-ojf", "-of", str(base), "-t", env("WHISPER_THREADS", "4"),
-        "-mc", "0", "-sns", "-nth", env("WHISPER_NO_SPEECH_THRESHOLD", "0.60"),
+        "-mc", "0", "-nf", "-et", env("WHISPER_ENTROPY_THRESHOLD", "2.60"),
+        "-lpt", env("WHISPER_LOGPROB_THRESHOLD", "-1.25"),
+        "-sns", "-nth", env("WHISPER_NO_SPEECH_THRESHOLD", "0.60"),
+        "--vad", "--vad-model", str(VAD_MODEL),
+        "--vad-threshold", env("WHISPER_VAD_THRESHOLD", "0.50"),
+        "--vad-min-speech-duration-ms", env("WHISPER_VAD_MIN_SPEECH_MS", "250"),
+        "--vad-min-silence-duration-ms", env("WHISPER_VAD_MIN_SILENCE_MS", "300"),
+        "--vad-max-speech-duration-s", env("WHISPER_VAD_MAX_SPEECH_SEC", "30"),
+        "--vad-speech-pad-ms", env("WHISPER_VAD_PAD_MS", "300"),
     ]
     if translate:
         cmd.append("-tr")
