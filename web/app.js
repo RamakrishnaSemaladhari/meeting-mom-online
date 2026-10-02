@@ -3,7 +3,7 @@ const DRIVE_INBOX_ID = "1IfS5M0bvmXYg1Oe_pqg1ZGhx7gHc2ufa";
 
 const CONFIG = {
   clientId: "143751867061-aq2n18bdepa6s23d6mrpufprtd7p87v7.apps.googleusercontent.com",
-  driveScope: "https://www.googleapis.com/auth/drive.file",
+  driveScope: "https://www.googleapis.com/auth/drive",
   gateway: "https://script.google.com/macros/s/AKfycbwisXCTq0olYGcrJE2e2w1VqFSuLhjVvbGiYhGm4XzwrmAlYKlLudr9DwhYl2SYyFQE3w/exec"
 };
 
@@ -134,7 +134,10 @@ function renderBackgroundProcessing() {
       '<div class="background-status">' +
         '<div>' + statusText + '</div>' +
         (canRestart
-          ? '<button type="button" class="secondary mini background-retry" data-meeting-id="' + escapeHtml(item.id) + '">RESTART PROCESSING</button>'
+          ? '<div class="background-actions">' +
+              '<button type="button" class="secondary mini background-retry" data-meeting-id="' + escapeHtml(item.id) + '">RESTART PROCESSING</button>' +
+              '<button type="button" class="secondary mini background-clear" data-meeting-id="' + escapeHtml(item.id) + '">CLEAR</button>' +
+            '</div>'
           : '') +
       '</div>' +
       '</div>';
@@ -145,6 +148,35 @@ function renderBackgroundProcessing() {
       restartBackgroundMeeting(button.getAttribute("data-meeting-id"), button);
     });
   });
+
+  list.querySelectorAll(".background-clear").forEach(function(button) {
+    button.addEventListener("click", function() {
+      clearBackgroundMeeting(button.getAttribute("data-meeting-id"));
+    });
+  });
+}
+
+function clearBackgroundMeeting(id) {
+  const item = backgroundProcessing.find(function(x) { return x.id === id; });
+  if (!item) return;
+
+  const active = item.runId && item.stage !== "failed" && item.stage !== "complete";
+  if (active) {
+    status("This meeting is still processing. Clear is available after it stops or fails.", "error");
+    return;
+  }
+
+  backgroundProcessing = backgroundProcessing.filter(function(x) { return x.id !== id; });
+  saveBackgroundProcessingQueue();
+  renderBackgroundProcessing();
+
+  if (meetingFolders?.meeting?.id === id) {
+    meetingFolders = null;
+    audioUploaded = false;
+    persistMeetingState();
+  }
+
+  status("Previous meeting removed from this page. The Google Drive files were not deleted.", "success");
 }
 
 function addBackgroundProcessing(meeting, statusText, extra) {
@@ -487,8 +519,9 @@ function initGoogle() {
       $("meetingCard").classList.remove("hidden");
       $("date").value = $("date").value || todayISO();
       renderBackgroundProcessing();
+      let restored = false;
       try {
-        const restored = restoreMeetingState();
+        restored = restoreMeetingState();
         await ensureAppDriveRoot();
         if (restored) {
           const existingJob = meetingFolders?.meeting?.id
