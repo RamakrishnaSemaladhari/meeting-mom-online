@@ -58,7 +58,7 @@ jobs:
           path: |
             whisper.cpp/build/bin/whisper-cli
             whisper.cpp/models/ggml-small-q5_1.bin
-          key: ${{ runner.os }}-whisper-runtime-v6-cli
+          key: ${{ runner.os }}-whisper-runtime-v7-quality
 
       - name: Prepare Whisper runtime
         run: |
@@ -238,7 +238,7 @@ jobs:
           path: |
             whisper.cpp/build/bin/whisper-cli
             whisper.cpp/models/ggml-small-q5_1.bin
-          key: ${{ runner.os }}-whisper-runtime-v6-cli
+          key: ${{ runner.os }}-whisper-runtime-v7-quality
 
       - name: Prepare Whisper runtime
         run: |
