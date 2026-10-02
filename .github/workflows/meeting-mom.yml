@@ -147,6 +147,9 @@ jobs:
       OPENBLAS_NUM_THREADS: 4
       MKL_NUM_THREADS: 4
       NUMEXPR_NUM_THREADS: 4
+      WHISPER_THREADS: 4
+      AUDIO_FILE_ID: ${{ github.event.client_payload.audio_file_id }}
+      STRICT_AUDIO_SELECTION: "true"
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -230,12 +233,19 @@ jobs:
           else
             echo "Whisper cache miss. Building Whisper.cpp once for the cache..."
             git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
-            cmake -B whisper.cpp-src/build whisper.cpp-src
+            cmake -B whisper.cpp-src/build whisper.cpp-src -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
             cmake --build whisper.cpp-src/build -j --config Release
             cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
             chmod +x whisper.cpp/build/bin/whisper-cli
             rm -rf whisper.cpp-src
           fi
+
+          ldd whisper.cpp/build/bin/whisper-cli || true
+          if ldd whisper.cpp/build/bin/whisper-cli 2>/dev/null | grep -Eq "libwhisper|libggml"; then
+            echo "ERROR: whisper-cli still depends on shared whisper/ggml libraries"
+            exit 1
+          fi
+          whisper.cpp/build/bin/whisper-cli --help >/dev/null 2>&1 || (echo "ERROR: whisper-cli does not start" && exit 1)
 
           if [ -f whisper.cpp/models/ggml-small-q5_1.bin ]; then
             echo "Whisper model restored from cache."
@@ -284,6 +294,14 @@ jobs:
 
           echo "AI engine ready."
 
+      - name: Write QUEUED status
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          MEETING_ID: ${{ github.event.client_payload.meeting_id }}
+          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
+          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
+        run: python processor/scripts/process_meeting.py --stage init
+
       - name: Diagnose Google Drive meeting access
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
@@ -328,6 +346,17 @@ jobs:
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
         run: python processor/scripts/process_meeting.py --stage mom
+
+      - name: Record failure status
+        if: failure()
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          MEETING_ID: ${{ github.event.client_payload.meeting_id }}
+          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
+          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
+          FAILED_STEP: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILED_ERROR_CODE: MOM-003
+        run: python processor/scripts/process_meeting.py --stage fail
 
       - name: Results ready
         run: echo "Meeting transcript, translation, AI evidence and MoM are ready in Google Drive."
