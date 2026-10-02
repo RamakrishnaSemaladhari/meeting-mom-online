@@ -70,6 +70,12 @@ jobs:
             cmake --build whisper.cpp-src/build -j --config Release
             cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
             chmod +x whisper.cpp/build/bin/whisper-cli
+            echo "Whisper binary dependency check:"
+            ldd whisper.cpp/build/bin/whisper-cli || true
+            if ldd whisper.cpp/build/bin/whisper-cli 2>/dev/null | grep -q "libwhisper.so"; then
+              echo "ERROR: whisper-cli still depends on libwhisper.so"
+              exit 1
+            fi
             rm -rf whisper.cpp-src
           else
             echo "Whisper executable already cached."
@@ -136,6 +142,11 @@ jobs:
   process-meeting:
     if: github.event_name == 'repository_dispatch'
     runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: 4
+      OPENBLAS_NUM_THREADS: 4
+      MKL_NUM_THREADS: 4
+      NUMEXPR_NUM_THREADS: 4
     timeout-minutes: 90
     steps:
       - name: Checkout
