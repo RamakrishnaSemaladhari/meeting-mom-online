@@ -11,10 +11,6 @@ on:
   repository_dispatch:
     types: [meeting-ready]
 
-concurrency:
-  group: meeting-mom-${{ github.event.client_payload.meeting_id || github.ref }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
 
