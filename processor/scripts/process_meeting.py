@@ -303,7 +303,46 @@ def output_folders(service, meeting_folder):
         q=f"'{meeting_folder}' in parents and trashed = false",
         pageSize=50, fields="files(id,name,mimeType)"
     ).execute().get("files", [])
-    return {x["name"]: x["id"] for x in children if x["mimeType"] == "application/vnd.google-apps.folder"}
+
+    existing = {
+        x["name"]: x["id"]
+        for x in children
+        if x["mimeType"] == "application/vnd.google-apps.folder"
+    }
+
+    # Older/newer meeting workspaces may use plural TRANSCRIPTS /
+    # TRANSLATIONS names. Internally keep one canonical key.
+    aliases = {
+        "TRANSCRIPT": ("TRANSCRIPT", "TRANSCRIPTS"),
+        "TRANSLATION": ("TRANSLATION", "TRANSLATIONS"),
+        "AI": ("AI",),
+        "MOM": ("MOM",),
+    }
+
+    result = {}
+    for canonical, names in aliases.items():
+        folder_id = next((existing[name] for name in names if name in existing), None)
+
+        # If a required output folder is missing, create it rather than
+        # failing before audio processing begins.
+        if not folder_id:
+            log(f"Creating missing meeting output folder: {canonical}")
+            created = service.files().create(
+                body={
+                    "name": canonical,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [meeting_folder],
+                },
+                fields="id,name"
+            ).execute()
+            folder_id = created["id"]
+
+        result[canonical] = folder_id
+
+    log("Meeting output folders ready: " + ", ".join(
+        f"{name}={folder_id}" for name, folder_id in result.items()
+    ))
+    return result
 
 def stage_paths():
     root = Path(".meeting_work")
