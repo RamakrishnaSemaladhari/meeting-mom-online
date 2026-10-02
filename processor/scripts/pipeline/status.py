@@ -6,6 +6,7 @@ Stored in the meeting folder root, where the web app already reads and creates i
 import datetime
 import json
 import re
+import time
 from pathlib import Path
 
 STATUS_FILE = "PROCESSING_STATUS.json"
@@ -85,7 +86,13 @@ class StatusReporter:
         self.local_path.write_text(text, encoding="utf-8")
         if not self.folder_id:
             return
-        try:
-            self.store.upsert_text(self.folder_id, STATUS_FILE, text, "application/json")
-        except Exception as exc:
-            print(f"WARNING [MOM-014] status upload failed: {sanitize(exc)}", flush=True)
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                self.store.upsert_text(self.folder_id, STATUS_FILE, text, "application/json")
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(attempt * 2)
+        print(f"WARNING [MOM-014] status upload failed after 3 attempts: {sanitize(last_error)}", flush=True)
