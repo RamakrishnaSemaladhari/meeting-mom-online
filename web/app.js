@@ -114,16 +114,34 @@ function renderBackgroundProcessing() {
     list.innerHTML = "";
     return;
   }
+
   card.classList.remove("hidden");
   list.innerHTML = backgroundProcessing.map(item => {
     const title = escapeHtml(item.title || "Meeting");
     const statusText = escapeHtml(item.statusText || "Processing request sent");
     const time = item.created_at ? new Date(item.created_at).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}) : "";
+    const canRestart =
+      item.stage === "failed" ||
+      statusText === "Processing failed" ||
+      statusText === "Waiting to start processing" ||
+      statusText === "Previous test run did not process the meeting audio.";
+
     return '<div class="background-row">' +
       '<div><b>' + title + '</b><div class="muted small">' + time + '</div></div>' +
-      '<div class="background-status">' + statusText + '</div>' +
+      '<div class="background-status">' +
+        '<div>' + statusText + '</div>' +
+        (canRestart
+          ? '<button type="button" class="secondary mini background-retry" data-meeting-id="' + escapeHtml(item.id) + '">RESTART PROCESSING</button>'
+          : '') +
+      '</div>' +
       '</div>';
   }).join("");
+
+  list.querySelectorAll(".background-retry").forEach(function(button) {
+    button.addEventListener("click", function() {
+      restartBackgroundMeeting(button.getAttribute("data-meeting-id"), button);
+    });
+  });
 }
 
 function addBackgroundProcessing(meeting, statusText, extra) {
@@ -307,6 +325,111 @@ function ensureRetryButton() {
   retryButton.style.marginTop = "10px";
   retryButton.addEventListener("click", retryProcessing);
   box.appendChild(retryButton);
+}
+
+async function loadBackgroundMeetingSnapshot(item) {
+  if (!item || !item.meetingFolderId) {
+    throw new Error("Saved meeting folder information is missing.");
+  }
+
+  const children = await listDriveFiles(
+    "'" + item.meetingFolderId + "' in parents and trashed = false"
+  );
+
+  const audio = children.find(function(x) {
+    return x.name === "AUDIO" &&
+      x.mimeType === "application/vnd.google-apps.folder";
+  });
+
+  if (!audio) throw new Error("The saved meeting AUDIO folder could not be found.");
+
+  const audioFiles = await listDriveFiles(
+    "'" + audio.id + "' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
+  );
+
+  if (!audioFiles.length) {
+    throw new Error("The saved meeting has no audio file in Google Drive.");
+  }
+
+  const subfolders = {};
+  ["TRANSCRIPT","TRANSLATION","AI","MOM"].forEach(function(name) {
+    subfolders[name] = children.find(function(x) {
+      return x.name === name &&
+        x.mimeType === "application/vnd.google-apps.folder";
+    }) || null;
+  });
+
+  const metadata = children.find(function(x) {
+    return x.name === "meeting_metadata.json";
+  }) || null;
+
+  return {
+    meeting: {
+      id: item.meetingFolderId,
+      name: item.title || "Meeting",
+      mimeType: "application/vnd.google-apps.folder"
+    },
+    audio: audio,
+    transcript: subfolders.TRANSCRIPT,
+    translation: subfolders.TRANSLATION,
+    ai: subfolders.AI,
+    mom: subfolders.MOM,
+    metadata: metadata,
+    audioFile: audioFiles[0],
+    audioUploaded: true
+  };
+}
+
+async function restartBackgroundMeeting(id, button) {
+  const item = backgroundProcessing.find(function(x) {
+    return x.id === id;
+  });
+
+  if (!item) {
+    status("The previous meeting could not be found in the processing list.", "error");
+    return;
+  }
+
+  if (item.stage === "complete") {
+    status("This meeting has already completed processing.", "success");
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+    button.textContent = "STARTING...";
+  }
+
+  try {
+    status("Recovering the previous meeting from Google Drive...", "");
+    const snapshot = await loadBackgroundMeetingSnapshot(item);
+
+    updateBackgroundProcessing(id, {
+      statusText: "Restarting processing",
+      stage: "checking",
+      percent: 5,
+      runId: ""
+    });
+
+    await notifyProcessingStarted(snapshot, {backgroundOnly: true});
+
+    status(
+      "Previous meeting processing has been restarted. The existing audio will not be uploaded again.",
+      "success"
+    );
+  } catch (err) {
+    updateBackgroundProcessing(id, {
+      statusText: "Waiting to start processing",
+      stage: "failed"
+    });
+
+    if (button) {
+      button.disabled = false;
+      button.textContent = "RESTART PROCESSING";
+    }
+
+    status("Could not restart the previous meeting: " + err.message, "error");
+  }
 }
 
 async function retryProcessing() {
@@ -925,7 +1048,8 @@ async function uploadSelectedAudio() {
 }
 
 
-async function notifyProcessingStarted(snapshot) {
+async function notifyProcessingStarted(snapshot, options) {
+  options = options || {};
   snapshot = snapshot || meetingFolders;
   if (!snapshot || !snapshot.meeting || !snapshot.audio) {
     throw new Error("Meeting workspace information is missing.");
@@ -962,15 +1086,17 @@ async function notifyProcessingStarted(snapshot) {
     percent: 5
   });
 
-  if (retryButton) retryButton.classList.add("hidden");
-  if ($("uploadText")) {
-    $("uploadText").textContent =
-      "Processing request sent. Existing audio will not be uploaded again.";
-  }
+  if (!options.backgroundOnly) {
+    if (retryButton) retryButton.classList.add("hidden");
+    if ($("uploadText")) {
+      $("uploadText").textContent =
+        "Processing request sent. Existing audio will not be uploaded again.";
+    }
 
-  showRecoveredProcessingUI(
-    "Processing request sent. Waiting for GitHub Actions to begin."
-  );
+    showRecoveredProcessingUI(
+      "Processing request sent. Waiting for GitHub Actions to begin."
+    );
+  }
 
   setTimeout(function() {
     findAndMonitorLatestRun(item, requestStarted);
