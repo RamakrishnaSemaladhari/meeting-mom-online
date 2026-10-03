@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -15,7 +15,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  apply-incoming-patch:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply supplied engineering patch when present
+        run: |
+          set -euo pipefail
+          if [ ! -s incoming/meeting-mom.patch ]; then
+            echo "No incoming patch; nothing to apply."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git am --3way incoming/meeting-mom.patch
+          pip install -r processor/requirements.txt
+          python -m py_compile processor/scripts/process_meeting.py processor/scripts/pipeline/speech_quality.py
+          python -m unittest discover -s processor/tests -p "test_*.py" -v
+          rm -f incoming/meeting-mom.patch .github/workflows/apply-incoming-patch.yml
+          git add -A
+          git commit --amend --no-edit
+          git push origin HEAD:main
+
   deploy:
+    needs: apply-incoming-patch
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
