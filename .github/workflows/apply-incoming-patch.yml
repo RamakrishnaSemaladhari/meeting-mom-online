@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "incoming/meeting-mom.patch"
+      - ".github/workflows/apply-incoming-patch.yml"
 
 permissions:
   contents: write
