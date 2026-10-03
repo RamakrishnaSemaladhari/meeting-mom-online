@@ -18,15 +18,37 @@ class DriveStore:
 
     @classmethod
     def from_env(cls):
+        from googleapiclient.discovery import build
+
+        # Service accounts have no My Drive storage quota. When an OAuth refresh
+        # token is configured, authenticate as the human Drive user so files
+        # created in My Drive consume that user's quota and remain in the user's
+        # meeting folders. This is the preferred online deployment mode.
+        refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
+        if refresh_token:
+            client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+            client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+            if not client_id:
+                raise MomError("MOM-002", "GOOGLE_OAUTH_CLIENT_ID is required when GOOGLE_OAUTH_REFRESH_TOKEN is configured.")
+            from google.oauth2.credentials import Credentials
+            creds = Credentials(
+                token=None,
+                refresh_token=refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=client_id,
+                client_secret=client_secret or None,
+                scopes=SCOPES,
+            )
+            return cls(build("drive", "v3", credentials=creds, cache_discovery=False))
+
         raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
         if not raw:
-            raise MomError("MOM-002", "GOOGLE_SERVICE_ACCOUNT_JSON is not configured.")
+            raise MomError("MOM-002", "Configure GOOGLE_OAUTH_REFRESH_TOKEN + GOOGLE_OAUTH_CLIENT_ID for My Drive output, or GOOGLE_SERVICE_ACCOUNT_JSON for shared-drive-compatible processing.")
         try:
             info = json.loads(raw)
         except ValueError:
             raise MomError("MOM-002", "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.")
         from google.oauth2 import service_account
-        from googleapiclient.discovery import build
         creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
         return cls(build("drive", "v3", credentials=creds, cache_discovery=False))
 
@@ -116,6 +138,13 @@ class DriveStore:
                 body={"name": name, "parents": [parent_id]}, media_body=media,
                 fields="id,name,webViewLink", supportsAllDrives=True).execute()
         except Exception as exc:
+            message = str(exc)
+            if "storageQuotaExceeded" in message or "Service Accounts do not have storage quota" in message:
+                raise MomError(
+                    "MOM-013",
+                    f"Drive upload of {name} failed because the processor is using a service account without My Drive storage quota. "
+                    "Configure GOOGLE_OAUTH_REFRESH_TOKEN and GOOGLE_OAUTH_CLIENT_ID in GitHub Actions, or move the output workspace to a Shared Drive."
+                )
             raise MomError("MOM-013", f"Drive upload of {name} failed: {exc}")
 
     def upsert_text(self, parent_id, name, text, mime="text/plain"):
