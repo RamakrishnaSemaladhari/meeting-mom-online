@@ -1,1 +1,1387 @@
-The requested file reference is not currently visible. Use files.search or files.list to rediscover the file, then retry with a returned ref_id or file_id.
+From 04d6cfdda0001a3b7d57c96f96fa8af29d5c5114 Mon Sep 17 00:00:00 2001
+From: Ramakrishna Semaladhari <noreply@example.com>
+Date: Sat, 3 Oct 2026 10:02:40 +0000
+Subject: [PATCH] Transcript quality gate with stronger-model fallback, audio
+ health check, shared Whisper runtime action (fixes process-job cache/VAD
+ mismatch)
+
+---
+ .github/actions/whisper-runtime/action.yml   |  95 +++++
+ .github/workflows/meeting-mom.yml            |  88 +---
+ docs/DRIVE_ARCHITECTURE.md                   |  15 +
+ processor/scripts/pipeline/errors.py         |   3 +
+ processor/scripts/pipeline/speech_quality.py | 161 ++++++++
+ processor/scripts/process_meeting.py         | 168 +++++---
+ processor/tests/test_pipeline.py             | 409 +++++++++++++++++++
+ processor/tests/test_transcript_gate.py      | 304 ++++++++++++++
+ 8 files changed, 1103 insertions(+), 140 deletions(-)
+ create mode 100644 .github/actions/whisper-runtime/action.yml
+ create mode 100644 processor/scripts/pipeline/speech_quality.py
+ create mode 100644 processor/tests/test_pipeline.py
+ create mode 100644 processor/tests/test_transcript_gate.py
+
+diff --git a/.github/actions/whisper-runtime/action.yml b/.github/actions/whisper-runtime/action.yml
+new file mode 100644
+index 0000000..1f73712
+--- /dev/null
++++ b/.github/actions/whisper-runtime/action.yml
+@@ -0,0 +1,95 @@
++name: Whisper runtime
++description: >
++  Restores or builds whisper-cli, the primary model and the Silero VAD model, and
++  best-effort caches a stronger fallback model. Used by BOTH the cache warm-up job
++  and the processing job so their cache keys and paths can never drift apart
++  (a different `path:` list makes actions/cache treat the entries as different caches).
++
++runs:
++  using: composite
++  steps:
++    - name: Restore Whisper runtime cache
++      uses: actions/cache@v4
++      with:
++        path: |
++          whisper.cpp/build/bin/whisper-cli
++          whisper.cpp/models/ggml-small-q5_1.bin
++          whisper.cpp/models/ggml-silero-v5.1.2.bin
++        key: ${{ runner.os }}-whisper-runtime-v9-vad
++
++    # Used only when the primary transcript fails the quality gate. Separate cache so a
++    # failed download can never invalidate the primary runtime cache.
++    - name: Restore Whisper fallback model cache
++      uses: actions/cache@v4
++      with:
++        path: whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin
++        key: ${{ runner.os }}-whisper-fallback-large-v3-turbo-q5_0-v1
++
++    - name: Prepare Whisper runtime
++      shell: bash
++      run: |
++        set -euo pipefail
++        mkdir -p whisper.cpp/build/bin whisper.cpp/models
++        HF=https://huggingface.co
++
++        if [ -x whisper.cpp/build/bin/whisper-cli ]; then
++          echo "Whisper executable restored from cache."
++        else
++          echo "Whisper cache miss. Building whisper.cpp once for the cache..."
++          git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
++          cmake -B whisper.cpp-src/build whisper.cpp-src -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
++          cmake --build whisper.cpp-src/build --target whisper-cli -j"$(nproc)" --config Release
++          cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
++          chmod +x whisper.cpp/build/bin/whisper-cli
++          rm -rf whisper.cpp-src
++        fi
++
++        echo "Whisper runtime linkage:"
++        ldd whisper.cpp/build/bin/whisper-cli || true
++        if ldd whisper.cpp/build/bin/whisper-cli 2>/dev/null | grep -Eq "libwhisper|libggml"; then
++          echo "ERROR: whisper-cli depends on libwhisper/libggml shared libraries (stale cache or shared build)"
++          exit 1
++        fi
++        whisper.cpp/build/bin/whisper-cli --help >/dev/null 2>&1 || { echo "ERROR: whisper-cli does not start"; exit 1; }
++        # The quality flags must exist in this build, otherwise Whisper would reject the command line.
++        for flag in --vad --vad-model --vad-max-speech-duration-s --no-fallback --entropy-thold --logprob-thold --max-context --suppress-nst; do
++          whisper.cpp/build/bin/whisper-cli --help 2>&1 | grep -q -- "$flag" || { echo "ERROR: whisper-cli does not support $flag"; exit 1; }
++        done
++
++        if [ -s whisper.cpp/models/ggml-small-q5_1.bin ]; then
++          echo "Primary Whisper model restored from cache."
++        else
++          echo "Downloading primary Whisper model once for the cache..."
++          curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin.part \
++            "$HF/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
++          mv whisper.cpp/models/ggml-small-q5_1.bin.part whisper.cpp/models/ggml-small-q5_1.bin
++        fi
++
++        if [ -s whisper.cpp/models/ggml-silero-v5.1.2.bin ]; then
++          echo "Silero VAD model restored from cache."
++        else
++          echo "Downloading Silero VAD model once for the cache..."
++          curl -L --fail --retry 3 -o whisper.cpp/models/ggml-silero-v5.1.2.bin.part \
++            "$HF/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin"
++          mv whisper.cpp/models/ggml-silero-v5.1.2.bin.part whisper.cpp/models/ggml-silero-v5.1.2.bin
++        fi
++
++        test -x whisper.cpp/build/bin/whisper-cli
++        test -s whisper.cpp/models/ggml-small-q5_1.bin
++        test -s whisper.cpp/models/ggml-silero-v5.1.2.bin
++
++        # Best effort: never fail the run because the optional model could not be fetched.
++        if [ -s whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin ]; then
++          echo "Fallback Whisper model restored from cache."
++        else
++          echo "Downloading fallback Whisper model (large-v3-turbo-q5_0, ~547 MiB)..."
++          if curl -L --fail --retry 3 -o whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin.part \
++               "$HF/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin" \
++             && [ "$(stat -c%s whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin.part)" -gt 400000000 ]; then
++            mv whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin.part whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin
++          else
++            echo "WARNING: fallback model unavailable; the quality gate will fail instead of retrying."
++            rm -f whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin.part
++          fi
++        fi
++        echo "Whisper runtime + VAD ready."
+diff --git a/.github/workflows/meeting-mom.yml b/.github/workflows/meeting-mom.yml
+index bfe9f9c..682495b 100644
+--- a/.github/workflows/meeting-mom.yml
++++ b/.github/workflows/meeting-mom.yml
+@@ -51,49 +51,8 @@ jobs:
+       - name: Install Python dependencies
+         run: pip install -r processor/requirements.txt
+ 
+-      - name: Restore Whisper runtime cache
+-        id: whisper-cache
+-        uses: actions/cache@v4
+-        with:
+-          path: |
+-            whisper.cpp/build/bin/whisper-cli
+-            whisper.cpp/models/ggml-small-q5_1.bin
+-            whisper.cpp/models/ggml-silero-v5.1.2.bin
+-          key: ${{ runner.os }}-whisper-runtime-v8-vad
+-
+-      - name: Prepare Whisper runtime
+-        run: |
+-          mkdir -p whisper.cpp/build/bin whisper.cpp/models
+-
+-          if [ ! -x whisper.cpp/build/bin/whisper-cli ]; then
+-            echo "Building Whisper runtime for reusable cache..."
+-            git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
+-            cmake -B whisper.cpp-src/build whisper.cpp-src -DBUILD_SHARED_LIBS=OFF
+-            cmake --build whisper.cpp-src/build --target whisper-cli -j --config Release
+-            cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
+-            chmod +x whisper.cpp/build/bin/whisper-cli
+-            echo "Whisper binary dependency check:"
+-            echo "Whisper runtime linkage:"
+-            ldd whisper.cpp/build/bin/whisper-cli || true
+-            rm -rf whisper.cpp-src
+-          else
+-            echo "Whisper executable already cached."
+-          fi
+-
+-          if [ ! -s whisper.cpp/models/ggml-small-q5_1.bin ]; then
+-            curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin \
+-              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+-          else
+-            echo "Whisper model already cached."
+-          fi
+-
+-          if [ -s whisper.cpp/models/ggml-silero-v5.1.2.bin ]; then
+-            echo "Whisper VAD model already cached."
+-          else
+-            echo "Downloading Silero VAD model once for the cache..."
+-            curl -L --fail --retry 3 -o whisper.cpp/models/ggml-silero-v5.1.2.bin \
+-              https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
+-          fi
++      - name: Whisper runtime (cached build, models and VAD)
++        uses: ./.github/actions/whisper-runtime
+ 
+       - name: Restore AI model cache
+         id: ai-cache
+@@ -240,47 +199,8 @@ jobs:
+ 
+       # Whisper.cpp is expensive to compile, so cache the final executable
+       # and model. The first run builds/downloads them; later meetings restore them.
+-      - name: Restore Whisper runtime cache
+-        id: whisper-cache
+-        uses: actions/cache@v4
+-        with:
+-          path: |
+-            whisper.cpp/build/bin/whisper-cli
+-            whisper.cpp/models/ggml-small-q5_1.bin
+-          key: ${{ runner.os }}-whisper-runtime-v8-vad
+-
+-      - name: Prepare Whisper runtime
+-        run: |
+-          mkdir -p whisper.cpp/build/bin whisper.cpp/models
+-
+-          if [ -x whisper.cpp/build/bin/whisper-cli ]; then
+-            echo "Whisper executable restored from cache."
+-          else
+-            echo "Whisper cache miss. Building Whisper.cpp once for the cache..."
+-            git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
+-            cmake -B whisper.cpp-src/build whisper.cpp-src -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+-            cmake --build whisper.cpp-src/build --target whisper-cli -j --config Release
+-            cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
+-            chmod +x whisper.cpp/build/bin/whisper-cli
+-            rm -rf whisper.cpp-src
+-          fi
+-
+-          echo "Whisper runtime linkage:"
+-          ldd whisper.cpp/build/bin/whisper-cli || true
+-          whisper.cpp/build/bin/whisper-cli --help >/dev/null 2>&1 || (echo "ERROR: whisper-cli does not start" && exit 1)
+-
+-          if [ -f whisper.cpp/models/ggml-small-q5_1.bin ]; then
+-            echo "Whisper model restored from cache."
+-          else
+-            echo "Downloading Whisper model once for the cache..."
+-            curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin \
+-              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+-          fi
+-
+-          test -x whisper.cpp/build/bin/whisper-cli
+-          test -s whisper.cpp/models/ggml-small-q5_1.bin
+-          test -s whisper.cpp/models/ggml-silero-v5.1.2.bin
+-          echo "Whisper runtime + VAD ready."
++      - name: Whisper runtime (cached build, models and VAD)
++        uses: ./.github/actions/whisper-runtime
+ 
+       # Ollama model storage is also cached. The Ollama executable itself is
+       # small and is installed quickly; the large model does not need to be
+diff --git a/docs/DRIVE_ARCHITECTURE.md b/docs/DRIVE_ARCHITECTURE.md
+index 3078041..15b672d 100644
+--- a/docs/DRIVE_ARCHITECTURE.md
++++ b/docs/DRIVE_ARCHITECTURE.md
+@@ -19,3 +19,18 @@ Per meeting folder:
+ - MOM
+ 
+ Privacy boundary: meeting content is processed temporarily and is not committed to GitHub.
++
++## Transcription safeguards (Whisper)
++
++Audio -> **audio health check** (`MOM-020` if silent/too short) -> Silero VAD + Whisper primary
++(`-nf`, `-mc 0`, entropy/log-prob thresholds) -> **transcript quality gate** -> stronger Whisper model
++(`large-v3-turbo-q5_0`, cached best-effort) only if the gate fails -> `MOM-019` if every model fails.
++Looping/garbled text is discarded and never reaches translation, the AI stage or the MoM.
++
++- English recordings skip the second (`-tr`) Whisper pass; the transcript is the translation.
++- A translation that fails its gate is dropped (with a warning in `PROCESSING_COMPLETE.json`);
++  the AI continues on the original transcript, which already passed.
++- The gate measures vocabulary variety per 200-word window, repeated phrases, runs of duplicate
++  segments, invalid characters and how much of the recording the transcript covers.
++- `MOM-019` and `MOM-020` extend the spec's error table (`MOM-016..018` stay reserved for the offline system).
++- Whisper build, models and VAD are defined once in `.github/actions/whisper-runtime` and used by both jobs.
+diff --git a/processor/scripts/pipeline/errors.py b/processor/scripts/pipeline/errors.py
+index ff9a80d..8b920b5 100644
+--- a/processor/scripts/pipeline/errors.py
++++ b/processor/scripts/pipeline/errors.py
+@@ -16,6 +16,9 @@ ERROR_NAMES = {
+     "MOM-013": "Drive upload failure",
+     "MOM-014": "Status update failure",
+     "MOM-015": "Mobile result retrieval failure",
++    # Extensions to the spec table (MOM-016..018 are reserved for the offline system).
++    "MOM-019": "Transcript quality failure",
++    "MOM-020": "Audio health failure",
+ }
+ 
+ STAGE_DEFAULT_CODE = {
+diff --git a/processor/scripts/pipeline/speech_quality.py b/processor/scripts/pipeline/speech_quality.py
+new file mode 100644
+index 0000000..4167ffc
+--- /dev/null
++++ b/processor/scripts/pipeline/speech_quality.py
+@@ -0,0 +1,161 @@
++"""Audio health check and transcript quality gate.
++
++Whisper can fall into a decoding loop (the same phrase repeated for the whole
++recording).  That text must never reach translation, Qwen or the MoM.  These
++checks are pure functions so they can be tested without Whisper:
++
++    audio_report_from_ffmpeg(stderr)  -> metrics dict
++    assess_audio(metrics)             -> (problems, warnings)    problems => MOM-020
++    assess_transcript(segments, ...)  -> {"passed", "problems", "metrics"}   => MOM-019
++"""
++import difflib
++import re
++from collections import Counter
++
++# Spec extension: MOM-019 transcript quality, MOM-020 audio health.
++MIN_CHARS = 20
++MIN_TOKENS_FOR_LOOP_CHECKS = 40
++WINDOW_TOKENS = 200            # vocabulary repeats naturally over a long meeting, so measure per window
++WINDOW_UNIQUE_FLOOR = 0.15     # real speech sits well above this in any 200-word window; loops sit near 0.02
++BAD_WINDOW_SHARE = 0.30
++REPEATED_SEGMENT_CEILING = 0.50
++DUPLICATE_RUN_LIMIT = 5
++NGRAM_LOOP_CEILING = 0.50
++NGRAM_REPEAT_MIN = 8
++COVERAGE_FLOOR = 0.35
++COVERAGE_MIN_AUDIO_SECONDS = 180
++
++SILENT_MAX_VOLUME_DB = -55.0
++QUIET_MEAN_VOLUME_DB = -45.0
++MOSTLY_SILENT_RATIO = 0.85
++MIN_AUDIO_SECONDS = 3.0
++
++_WORD = re.compile(r"[\w\u0900-\u0DFF]+", re.UNICODE)
++
++
++# --------------------------------------------------------------- audio health
++def _hms_to_seconds(h, m, s):
++    return int(h) * 3600 + int(m) * 60 + float(s)
++
++
++def audio_report_from_ffmpeg(stderr):
++    """Parse `ffmpeg -af volumedetect,silencedetect -f null -` output."""
++    report = {}
++    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr)
++    if m:
++        report["duration_seconds"] = _hms_to_seconds(*m.groups())
++    for key in ("mean_volume", "max_volume"):
++        m = re.search(key + r":\s*(-?\d+(?:\.\d+)?)\s*dB", stderr)
++        if m:
++            report[key + "_db"] = float(m.group(1))
++    silence = [float(x) for x in re.findall(r"silence_duration:\s*(\d+(?:\.\d+)?)", stderr)]
++    report["silence_seconds"] = round(sum(silence), 2)
++    duration = report.get("duration_seconds")
++    if duration:
++        report["silence_ratio"] = round(min(report["silence_seconds"] / duration, 1.0), 3)
++    return report
++
++
++def assess_audio(report):
++    """Returns (problems, warnings).  Problems mean the audio cannot be transcribed usefully."""
++    problems, warnings = [], []
++    duration = report.get("duration_seconds")
++    if duration is not None and duration < MIN_AUDIO_SECONDS:
++        problems.append(f"The recording is only {duration:.1f} seconds long.")
++    max_db = report.get("max_volume_db")
++    if max_db is not None and max_db < SILENT_MAX_VOLUME_DB:
++        problems.append(f"The recording is effectively silent (peak level {max_db:.0f} dB).")
++    mean_db = report.get("mean_volume_db")
++    if mean_db is not None and mean_db < QUIET_MEAN_VOLUME_DB and not problems:
++        warnings.append(f"The recording is very quiet (average level {mean_db:.0f} dB); accuracy may suffer.")
++    ratio = report.get("silence_ratio")
++    if ratio is not None and ratio > MOSTLY_SILENT_RATIO and not problems:
++        warnings.append(f"About {ratio:.0%} of the recording is silence.")
++    return problems, warnings
++
++
++# ---------------------------------------------------------- transcript quality
++def _norm(text):
++    return " ".join(_WORD.findall(text.lower()))
++
++
++def _longest_duplicate_run(normalized):
++    longest = run = 1 if normalized else 0
++    for prev, cur in zip(normalized, normalized[1:]):
++        same = bool(prev) and bool(cur) and (
++            prev == cur or difflib.SequenceMatcher(None, prev, cur, autojunk=False).ratio() >= 0.9)
++        run = run + 1 if same else 1
++        longest = max(longest, run)
++    return longest
++
++
++def _bad_window_share(tokens):
++    """Share of 200-word windows whose vocabulary is implausibly small (a repetition loop)."""
++    if len(tokens) < WINDOW_TOKENS // 2:
++        return 0.0
++    windows = [tokens[i:i + WINDOW_TOKENS] for i in range(0, len(tokens), WINDOW_TOKENS)]
++    if len(windows) > 1 and len(windows[-1]) < WINDOW_TOKENS // 2:
++        windows.pop()  # ignore a short tail
++    bad = sum(len(set(w)) / len(w) < WINDOW_UNIQUE_FLOOR for w in windows)
++    return bad / len(windows)
++
++
++def _ngram_loop_ratio(tokens, n=3):
++    if len(tokens) < n + 1:
++        return 0.0
++    grams = [tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
++    counts = Counter(grams)
++    looped = sum(c for c in counts.values() if c >= NGRAM_REPEAT_MIN)
++    return looped / len(grams)
++
++
++def assess_transcript(segments, audio_seconds=None):
++    texts = [str(s.get("text", "")).strip() for s in segments if str(s.get("text", "")).strip()]
++    compact = re.sub(r"\s+", " ", " ".join(texts)).strip()
++    tokens = _norm(compact).split()
++    normalized = [_norm(t) for t in texts]
++
++    unique_ratio = len(set(tokens)) / max(1, len(tokens))
++    repeated_ratio = 0.0
++    if len(texts) >= 6:
++        counts = Counter(n for n in normalized if n)
++        repeated_ratio = max(counts.values(), default=0) / len(normalized)
++    run = _longest_duplicate_run(normalized)
++    ngram_ratio = _ngram_loop_ratio(tokens)
++    bad_windows = _bad_window_share(tokens)
++    replacements = compact.count("\ufffd")
++    last_end = max((float(s.get("end", 0) or 0) for s in segments), default=0.0)
++    coverage = (last_end / audio_seconds) if audio_seconds else None
++
++    problems = []
++    if len(compact) < MIN_CHARS:
++        problems.append("almost no speech text was produced")
++    if replacements > max(10, len(compact) // 200):
++        problems.append(f"{replacements} invalid characters in the text")
++    if len(tokens) >= MIN_TOKENS_FOR_LOOP_CHECKS:
++        if bad_windows >= BAD_WINDOW_SHARE:
++            problems.append(f"{bad_windows:.0%} of the transcript has almost no distinct words (repetition loop)")
++        if ngram_ratio >= NGRAM_LOOP_CEILING:
++            problems.append(f"{ngram_ratio:.0%} of the text is the same phrase repeated")
++    if repeated_ratio >= REPEATED_SEGMENT_CEILING:
++        problems.append(f"{repeated_ratio:.0%} of the segments are identical")
++    if run >= DUPLICATE_RUN_LIMIT:
++        problems.append(f"{run} consecutive near-identical segments")
++    if audio_seconds and audio_seconds >= COVERAGE_MIN_AUDIO_SECONDS and coverage is not None and coverage < COVERAGE_FLOOR:
++        problems.append(f"the transcript ends at {coverage:.0%} of the recording")
++
++    return {
++        "passed": not problems,
++        "problems": problems,
++        "metrics": {
++            "usable_characters": len(compact),
++            "token_count": len(tokens),
++            "unique_token_ratio": round(unique_ratio, 4),
++            "low_variety_window_share": round(bad_windows, 3),
++            "repeated_segment_ratio": round(repeated_ratio, 4),
++            "longest_duplicate_run": run,
++            "repeated_phrase_ratio": round(ngram_ratio, 4),
++            "invalid_characters": replacements,
++            "coverage_ratio": None if coverage is None else round(coverage, 3),
++        },
++    }
+diff --git a/processor/scripts/process_meeting.py b/processor/scripts/process_meeting.py
+index a2ea5f0..ccc10a5 100644
+--- a/processor/scripts/process_meeting.py
++++ b/processor/scripts/process_meeting.py
+@@ -24,11 +24,15 @@ from pipeline.docx_builder import build_mom_doc
+ from pipeline.drive_store import DriveStore, select_audio
+ from pipeline.errors import STAGE_DEFAULT_CODE, MomError
+ from pipeline.status import StatusReporter, now
++from pipeline.speech_quality import assess_audio, assess_transcript, audio_report_from_ffmpeg
+ from pipeline.validation import validate
+ 
+ WORK = Path(".meeting_work")
+ WHISPER = Path("whisper.cpp/build/bin/whisper-cli")
+ WHISPER_MODEL = Path(os.environ.get("WHISPER_MODEL_PATH", "whisper.cpp/models/ggml-small-q5_1.bin"))
++# Optional stronger multilingual model, used only when the primary transcript fails the quality gate.
++# (large-v3-turbo cannot translate, so it is used for transcription only.)
++FALLBACK_MODEL = Path(os.environ.get("WHISPER_FALLBACK_MODEL_PATH", "whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin"))
+ VAD_MODEL = Path(os.environ.get("WHISPER_VAD_MODEL_PATH", "whisper.cpp/models/ggml-silero-v5.1.2.bin"))
+ DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+ JSON_MIME = "application/json"
+@@ -97,18 +101,19 @@ class Ctx:
+         self.folders, self.status, self.p = folders, status, paths()
+ 
+ 
+-def whisper_json(wav, base, translate=False):
++def whisper_json(wav, base, translate=False, model=None, language="auto"):
++    model = Path(model) if model else WHISPER_MODEL
+     if not WHISPER.exists():
+         raise MomError("MOM-005", f"Whisper executable not found at {WHISPER}.")
+-    if not WHISPER_MODEL.exists() or WHISPER_MODEL.stat().st_size == 0:
+-        raise MomError("MOM-006", f"Whisper model not found at {WHISPER_MODEL}.")
++    if not model.exists() or model.stat().st_size == 0:
++        raise MomError("MOM-006", f"Whisper model not found at {model}.")
+     if not VAD_MODEL.exists() or VAD_MODEL.stat().st_size == 0:
+         raise MomError("MOM-006", f"Whisper VAD model not found at {VAD_MODEL}.")
+ 
+     # Reduce cross-window repetition/hallucination on long or noisy recordings.
+     cmd = [
+-        str(WHISPER), "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", "auto",
+-        "-ojf", "-of", str(base), "-t", env("WHISPER_THREADS", "4"),
++        str(WHISPER), "-m", str(model), "-f", str(wav), "-l", language,
++        "-oj", "-of", str(base), "-t", env("WHISPER_THREADS", "4"),
+         "-mc", "0", "-nf", "-et", env("WHISPER_ENTROPY_THRESHOLD", "2.60"),
+         "-lpt", env("WHISPER_LOGPROB_THRESHOLD", "-1.25"),
+         "-sns", "-nth", env("WHISPER_NO_SPEECH_THRESHOLD", "0.60"),
+@@ -145,44 +150,61 @@ def whisper_json(wav, base, translate=False):
+     return data
+ 
+ 
+-def validate_transcript_quality(segments, diagnostics=None):
+-    diagnostics = diagnostics or {}
+-    texts = [str(s.get("text", "")).strip() for s in segments if str(s.get("text", "")).strip()]
+-    joined = " ".join(texts)
+-    compact = re.sub(r"\s+", " ", joined).strip()
+-    tokens = compact.lower().split()
+-
+-    if len(compact) < 20:
+-        raise MomError("MOM-008", "Transcript quality check failed: less than 20 characters of usable speech were detected.")
+-
+-    unique_ratio = len(set(tokens)) / max(1, len(tokens))
+-    repeated_segment_ratio = 0.0
+-    if len(texts) >= 4:
+-        normalized = [re.sub(r"\W+", "", t.lower()) for t in texts]
+-        counts = {}
+-        for item in normalized:
+-            if item:
+-                counts[item] = counts.get(item, 0) + 1
+-        repeated_segment_ratio = max(counts.values(), default=0) / max(1, len(normalized))
+-
+-    replacement_count = int(diagnostics.get("invalid_utf8_replacements", 0))
+-    if len(tokens) >= 40 and (unique_ratio < 0.08 or repeated_segment_ratio >= 0.75):
+-        raise MomError(
+-            "MOM-008",
+-            "Transcript quality check failed: Whisper produced highly repetitive text, "
+-            "which is consistent with silence/noise or transcription hallucination. "
+-            "Please verify the recording contains clear speech and try again."
+-        )
+-    if replacement_count > max(10, len(compact) // 200):
+-        raise MomError("MOM-008", "Transcript quality check failed: the Whisper output contained too many invalid characters.")
+-
+-    return {
+-        "usable_characters": len(compact),
+-        "token_count": len(tokens),
+-        "unique_token_ratio": round(unique_ratio, 4),
+-        "repeated_segment_ratio": round(repeated_segment_ratio, 4),
+-        "invalid_utf8_replacements": replacement_count,
+-    }
++def audio_health(wav, status=None):
++    """Measure level/silence/duration of the 16 kHz WAV. Hard-fails only on unusable audio (MOM-020)."""
++    try:
++        proc = subprocess.run(
++            ["ffmpeg", "-hide_banner", "-nostats", "-i", str(wav),
++             "-af", "volumedetect,silencedetect=noise=-40dB:d=1", "-f", "null", "-"],
++            capture_output=True, text=True, timeout=300)
++        report = audio_report_from_ffmpeg(proc.stderr)
++    except Exception as exc:  # the check is advisory when it cannot run
++        log(f"WARNING: audio health check could not run: {exc}")
++        return {}, []
++    problems, warnings = assess_audio(report)
++    log("Audio health: " + json.dumps(report))
++    for w in warnings:
++        log("WARNING: " + w)
++    if problems:
++        raise MomError("MOM-020", "Audio health check failed: " + " ".join(problems))
++    return report, warnings
++
++
++def language_hint(metadata_hint=""):
++    """'auto' or a single ISO code. Never a combined value such as 'en/te/hi'."""
++    value = (env("WHISPER_LANGUAGE") or metadata_hint or "auto").strip().lower()
++    return value if re.fullmatch(r"[a-z]{2,3}", value) else "auto"
++
++
++def detected_language(data):
++    return str(((data.get("result") or {}).get("language")) or "").lower()
++
++
++def transcribe_with_gate(wav, base_name, audio_seconds, language, status=None):
++    """Primary model -> quality gate -> stronger model -> quality gate -> MOM-019.
++
++    Bad Whisper text must never reach translation or the AI stage."""
++    models = [("primary", WHISPER_MODEL)]
++    if FALLBACK_MODEL.exists() and FALLBACK_MODEL.stat().st_size > 0 and FALLBACK_MODEL != WHISPER_MODEL:
++        models.append(("fallback", FALLBACK_MODEL))
++    attempts = []
++    for index, (label, model) in enumerate(models):
++        if index and status:
++            status.update("TRANSCRIBING", "Transcript quality check failed; retrying with a stronger Whisper model", 30)
++        data = whisper_json(wav, WORK / f"{base_name}_{label}", model=model, language=language)
++        segments = ai_mod.segments_from_whisper(data)
++        verdict = assess_transcript(segments, audio_seconds)
++        attempts.append({"label": label, "model": model.name, "passed": verdict["passed"],
++                         "problems": verdict["problems"], "metrics": verdict["metrics"]})
++        log(f"Transcript quality [{label} {model.name}]: " + json.dumps(attempts[-1]))
++        if verdict["passed"]:
++            data["_quality"] = dict(verdict["metrics"], passed=True, model_used=model.name,
++                                    attempts=attempts, language=detected_language(data))
++            return data, segments
++    reasons = "; ".join(f"{a['model']}: " + ", ".join(a["problems"]) for a in attempts)
++    hint = "" if len(models) > 1 else " (no stronger fallback model is installed)"
++    raise MomError("MOM-019", f"Transcript quality check failed - {reasons}{hint}. "
++                              "Whisper output was discarded; please verify the recording has clear speech.")
+ 
+ 
+ def timestamped_text(segments):
+@@ -230,19 +252,24 @@ def stage_whisper(ctx):
+                                    env("STRICT_AUDIO_SELECTION", "false").lower() == "true")
+     for w in warnings:
+         log("WARNING: " + w)
+-    ctx.p["warnings"].write_text(dump(warnings), encoding="utf-8")
+     log(f"Downloading meeting audio: {audio.get('name')}")
+     st.update("DOWNLOADING", "Downloading audio from Google Drive", 6)
+     ctx.store.download(audio["id"], ctx.p["source"])
+     st.update("CONVERTING", "Converting audio to 16 kHz mono WAV")
+     run_cmd(["ffmpeg", "-y", "-i", str(ctx.p["source"]), "-ar", "16000", "-ac", "1",
+              "-c:a", "pcm_s16le", str(ctx.p["wav"])], "MOM-004")
++
++    report, audio_warnings = audio_health(ctx.p["wav"])
++    warnings = warnings + audio_warnings
++    ctx.p["warnings"].write_text(dump(warnings), encoding="utf-8")
++
++    try:
++        hint = language_hint(load_metadata(ctx).get("language_hint", ""))
++    except Exception:
++        hint = language_hint()
+     st.update("TRANSCRIBING", "Transcribing with Whisper")
+-    data = whisper_json(ctx.p["wav"], WORK / "transcript")
+-    segments = ai_mod.segments_from_whisper(data)
+-    if not segments:
+-        raise MomError("MOM-005", "Whisper produced no transcript segments (silent or unreadable audio?).")
+-    data["_quality"] = validate_transcript_quality(segments, data.get("_decoder_diagnostics"))
++    data, segments = transcribe_with_gate(ctx.p["wav"], "transcript", report.get("duration_seconds"), hint, st)
++    data["_audio"] = report
+     ctx.p["transcript_json"].write_text(dump(data), encoding="utf-8")
+     st.update("TRANSCRIBING", "Saving original transcript", 40)
+     ctx.store.upsert_text(ctx.folders["TRANSCRIPT"], "Original Transcript.txt", timestamped_text(segments))
+@@ -253,14 +280,43 @@ def stage_translation(ctx):
+     st = ctx.status
+     if not ctx.p["wav"].exists():
+         raise MomError("MOM-007", "WAV audio is missing before the translation stage.")
+-    st.update("TRANSLATING", "Translating to English with Whisper")
+-    data = whisper_json(ctx.p["wav"], WORK / "translation", translate=True)
+-    segments = ai_mod.segments_from_whisper(data)
+-    if segments:
+-        data["_quality"] = validate_transcript_quality(segments, data.get("_decoder_diagnostics"))
++    transcript = json.loads(ctx.p["transcript_json"].read_text(encoding="utf-8")) if ctx.p["transcript_json"].exists() else {}
++    language = (transcript.get("_quality") or {}).get("language") or detected_language(transcript)
++    folder = ctx.folders["TRANSLATION"]
++
++    if language == "en":
++        # English audio: a second Whisper pass would only repeat the transcript (and the risk of a loop).
++        st.update("TRANSLATING", "Recording is English; no translation needed", 55)
++        data = {"transcription": transcript.get("transcription", []), "result": {"language": "en"},
++                "_quality": {"passed": True, "skipped": "source language is English"}}
++        segments = ai_mod.segments_from_whisper(data)
++    else:
++        st.update("TRANSLATING", "Translating to English with Whisper")
++        try:
++            data = whisper_json(ctx.p["wav"], WORK / "translation", translate=True)
++            segments = ai_mod.segments_from_whisper(data)
++            verdict = assess_transcript(segments, (transcript.get("_audio") or {}).get("duration_seconds"))
++            if not verdict["passed"]:
++                raise MomError("MOM-019", "Translation quality check failed - " + ", ".join(verdict["problems"]))
++            data["_quality"] = dict(verdict["metrics"], passed=True)
++        except MomError as exc:
++            if exc.code not in ("MOM-019", "MOM-007"):
++                raise
++            # Degrade rather than feed a bad translation to the AI: the original transcript passed its gate.
++            log(f"WARNING [{exc.code}] English translation discarded: {exc.message}")
++            data = {"transcription": [], "_quality": {"passed": False, "error_code": exc.code, "reason": exc.message}}
++            segments = []
++            warnings = json.loads(ctx.p["warnings"].read_text(encoding="utf-8")) if ctx.p["warnings"].exists() else []
++            warnings.append("English translation was discarded because it failed its quality check; "
++                            "the AI used the original transcript only. " + exc.message[:200])
++            ctx.p["warnings"].write_text(dump(warnings), encoding="utf-8")
+     ctx.p["translation_json"].write_text(dump(data), encoding="utf-8")
+-    ctx.store.upsert_text(ctx.folders["TRANSLATION"], "English Translation.txt", timestamped_text(segments))
+-    ctx.store.upsert_text(ctx.folders["TRANSLATION"], "Translation.json", dump(data), JSON_MIME)
++    if segments:
++        ctx.store.upsert_text(folder, "English Translation.txt", timestamped_text(segments))
++    else:
++        ctx.store.upsert_text(folder, "English Translation.txt",
++                              "No separate English translation was produced for this meeting.\n")
++    ctx.store.upsert_text(folder, "Translation.json", dump(data), JSON_MIME)
+     for key in ("source", "wav"):
+         ctx.p[key].unlink(missing_ok=True)
+ 
+diff --git a/processor/tests/test_pipeline.py b/processor/tests/test_pipeline.py
+new file mode 100644
+index 0000000..707ee3d
+--- /dev/null
++++ b/processor/tests/test_pipeline.py
+@@ -0,0 +1,409 @@
++"""Offline tests: no Drive, Whisper or Ollama needed.  Run from the repo root:
++    python -m unittest discover -s processor/tests -v
++"""
++import json
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "scripts"))
++
++import process_meeting as pm  # noqa: E402
++from docx import Document  # noqa: E402
++from pipeline import ai_understanding as ai  # noqa: E402
++from pipeline.docx_builder import build_mom_doc  # noqa: E402
++from pipeline.drive_store import FOLDER, choose_audio, select_audio  # noqa: E402
++from pipeline.errors import MomError  # noqa: E402
++from pipeline.status import StatusReporter, sanitize  # noqa: E402
++from pipeline.validation import parse_ts_seconds, validate  # noqa: E402
++
++
++class FakeStore:
++    """In-memory stand-in for DriveStore."""
++    def __init__(self):
++        self.files = {}      # (parent, name) -> bytes
++        self.folders = {}    # (parent, name) -> id
++        self.meta = {}       # file_id -> meta
++        self.audio_bytes = b"fake-audio"
++
++    def ensure_folder(self, parent, name):
++        return self.folders.setdefault((parent, name), f"{parent}/{name}")
++
++    def list_children(self, parent, name=None, folders=None):
++        return [m for m in self.meta.values() if parent in m.get("parents", [])
++                and (folders is None or (m["mimeType"] == FOLDER) == folders)]
++
++    def find_one(self, parent, name):
++        if (parent, name) in self.files:
++            return {"id": f"{parent}::{name}", "name": name}
++        return None
++
++    def read_bytes(self, file_id):
++        parent, name = file_id.split("::")
++        return self.files[(parent, name)]
++
++    def get_meta(self, file_id):
++        if file_id not in self.meta:
++            raise MomError("MOM-001", "not found")
++        return self.meta[file_id]
++
++    def download(self, file_id, dest):
++        Path(dest).write_bytes(self.audio_bytes)
++
++    def upsert_text(self, parent, name, text, mime="text/plain"):
++        self.files[(parent, name)] = text.encode("utf-8")
++
++    def upsert_file(self, parent, name, path, mime):
++        self.files[(parent, name)] = Path(path).read_bytes()
++
++    def text(self, parent, name):
++        return self.files[(parent, name)].decode("utf-8")
++
++
++def seg(a, b, text):
++    return {"start": a, "end": b, "text": text}
++
++
++TRANSCRIPT = [
++    seg(0, 20, "Welcome everyone. Today we review the vendor contract and the release schedule."),
++    seg(20, 60, "Ravi said the vendor contract needs legal review before signing."),
++    seg(60, 100, "We decided to postpone the release until the security audit is complete."),
++    seg(100, 140, "Priya will send the audit checklist to the team by Friday."),
++    seg(140, 180, "Maybe we could also look at a new logo someday, no commitment on that."),
++    seg(180, 200, "Let us meet again next Tuesday to confirm the audit status."),
++]
++
++
++class WhisperParsing(unittest.TestCase):
++    def test_offsets_are_milliseconds(self):
++        data = {"transcription": [{"offsets": {"from": 500, "to": 2500}, "text": " Hello "}]}
++        self.assertEqual(ai.segments_from_whisper(data), [{"start": 0.5, "end": 2.5, "text": "Hello"}])
++
++    def test_empty_segments_dropped(self):
++        data = {"transcription": [{"offsets": {"from": 0, "to": 1000}, "text": "  "}]}
++        self.assertEqual(ai.segments_from_whisper(data), [])
++
++
++class Chunking(unittest.TestCase):
++    def test_chunks_respect_budget_and_order(self):
++        chunks = ai.chunk_segments(TRANSCRIPT, 200)
++        self.assertGreater(len(chunks), 1)
++        self.assertEqual([s for c in chunks for s in c], TRANSCRIPT)
++
++    def test_english_translation_not_duplicated(self):
++        self.assertEqual(ai.translation_for_chunk(TRANSCRIPT, [dict(s) for s in TRANSCRIPT]), [])
++
++    def test_foreign_translation_included_and_time_aligned(self):
++        orig = [seg(0, 10, "నమస్కారం అందరికీ"), seg(10, 20, "ఈ రోజు ఒప్పందం గురించి")]
++        trans = [seg(0, 10, "Hello everyone"), seg(10, 20, "Today about the contract"), seg(500, 510, "far away")]
++        lines = ai.translation_for_chunk(orig, trans)
++        self.assertEqual(len(lines), 2)
++        self.assertIn("Hello everyone", lines[0])
++
++
++class AudioSelection(unittest.TestCase):
++    F1 = {"id": "a", "name": "old.m4a", "createdTime": "2026-01-01T00:00:00Z"}
++    F2 = {"id": "b", "name": "new.m4a", "createdTime": "2026-02-01T00:00:00Z"}
++
++    def test_single_file_ok(self):
++        self.assertEqual(choose_audio([self.F1], strict=True)[0]["id"], "a")
++
++    def test_none_is_mom001(self):
++        with self.assertRaises(MomError) as cm:
++            choose_audio([])
++        self.assertEqual(cm.exception.code, "MOM-001")
++
++    def test_ambiguous_strict_refuses(self):
++        with self.assertRaises(MomError):
++            choose_audio([self.F1, self.F2], strict=True)
++
++    def test_ambiguous_lenient_picks_newest_with_warning(self):
++        f, warnings = choose_audio([self.F1, self.F2], strict=False)
++        self.assertEqual(f["id"], "b")
++        self.assertEqual(len(warnings), 1)
++
++    def test_exact_file_id_wins_over_newer_file(self):
++        store = FakeStore()
++        store.meta = {"a": dict(self.F1, mimeType="audio/mp4", parents=["AUD"]),
++                      "b": dict(self.F2, mimeType="audio/mp4", parents=["AUD"])}
++        f, warnings = select_audio(store, "AUD", "a", strict=True)
++        self.assertEqual((f["id"], warnings), ("a", []))
++
++    def test_file_id_outside_audio_folder_rejected(self):
++        store = FakeStore()
++        store.meta = {"a": dict(self.F1, mimeType="audio/mp4", parents=["OTHER"])}
++        with self.assertRaises(MomError):
++            select_audio(store, "AUD", "a")
++
++
++class Normalisation(unittest.TestCase):
++    def test_sloppy_small_model_output_is_repaired(self):
++        raw = {"summary": "S", "decisions": ["Postpone release"],
++               "action_items": [{"action": "Send checklist", "owner": "", "deadline": "unknown"}, "bad", {"owner": "x"}],
++               "open_questions": "Who signs?", "next_meeting": None, "review_flags": ["a", {"k": "v"}]}
++        out = ai.normalize_chunk(raw)
++        self.assertEqual(out["section_summary"], "S")
++        self.assertEqual(out["decisions"][0]["decision"], "Postpone release")
++        a = out["action_items"]
++        self.assertEqual(a[0]["owner"], ai.DEFAULT_OWNER)
++        self.assertEqual(a[0]["deadline"], ai.DEFAULT_DEADLINE)
++        self.assertEqual(a[1]["action"], "bad")
++        self.assertEqual(len(a), 2)  # item without main text dropped
++        self.assertEqual(out["open_questions"], ["Who signs?"])
++        self.assertEqual(out["next_meeting"], [])
++
++    def test_dedupe_keeps_item_with_evidence(self):
++        a = {"decision": "Postpone release", "timestamp": "", "evidence": "", "review_flag": ""}
++        b = dict(a, evidence="we decided to postpone")
++        merged = ai.merge_sections([ai.normalize_chunk({"decisions": [a]}), ai.normalize_chunk({"decisions": [b]})])
++        self.assertEqual(len(merged["decisions"]), 1)
++        self.assertEqual(merged["decisions"][0]["evidence"], "we decided to postpone")
++
++
++def fake_llm():
++    calls = {"json": [], "text": []}
++
++    def json_fn(prompt):
++        calls["json"].append(prompt)
++        n = len(calls["json"])
++        return {
++            "section_summary": f"Narrative of section {n}.",
++            "discussion_points": ["Vendor contract and release schedule"],
++            "decisions": [{"decision": "Postpone the release until the security audit is complete",
++                           "timestamp": "00:01:00",
++                           "evidence": "We decided to postpone the release until the security audit is complete"}],
++            "action_items": [{"action": "Send the audit checklist", "owner": "Priya", "deadline": "Friday",
++                              "timestamp": "00:01:40",
++                              "evidence": "Priya will send the audit checklist to the team by Friday"}],
++            "commitments": [], "open_questions": [], "next_meeting": [], "review_flags": []}
++
++    def text_fn(prompt):
++        calls["text"].append(prompt)
++        return "Combined narrative." if "Chronological section summaries" in prompt else "Purpose: review. Outcomes: postponed."
++    return json_fn, text_fn, calls
++
++
++class Understanding(unittest.TestCase):
++    def test_both_summaries_produced_and_staged(self):
++        j, t, calls = fake_llm()
++        out = ai.run_understanding({"title": "T"}, TRANSCRIPT, [], j, t, max_chars=200, model="m")
++        self.assertGreater(len(calls["json"]), 1)                    # chunked, not one giant prompt
++        self.assertEqual(out["complete_conversation_summary"], "Combined narrative.")
++        self.assertTrue(out["executive_summary"].startswith("Purpose"))
++        self.assertNotEqual(out["executive_summary"], out["complete_conversation_summary"])
++        self.assertEqual(len(out["decisions"]), 1)                   # duplicates across chunks merged
++        for key in ai.OUTPUT_KEYS:
++            self.assertIn(key, out)
++
++    def test_translation_reaches_ai_prompt(self):
++        j, t, calls = fake_llm()
++        orig = [seg(0, 10, "నమస్కారం అందరికీ")]
++        ai.run_understanding({}, orig, [seg(0, 10, "Hello everyone")], j, t)
++        self.assertIn("ENGLISH TRANSLATION", calls["json"][0])
++        self.assertIn("Hello everyone", calls["json"][0])
++
++
++class Validation(unittest.TestCase):
++    def base(self, **over):
++        ai_obj = {"executive_summary": "e", "complete_conversation_summary": "c", "discussion_points": [],
++                  "decisions": [], "action_items": [], "commitments": [], "open_questions": [],
++                  "next_meeting": [], "review_flags": []}
++        ai_obj.update(over)
++        return ai_obj
++
++    def item(self, key, text, **kw):
++        d = {key: text, "timestamp": "", "evidence": "", "review_flag": ""}
++        if key in ("action", "commitment"):
++            d.update(owner=ai.DEFAULT_OWNER, deadline=ai.DEFAULT_DEADLINE)
++        d.update(kw)
++        return d
++
++    def test_supported_items_pass_clean(self):
++        obj = self.base(
++            decisions=[self.item("decision", "Postpone release", timestamp="00:01:00",
++                                 evidence="We decided to postpone the release until the security audit is complete")],
++            action_items=[self.item("action", "Send checklist", owner="Priya", deadline="Friday", timestamp="00:01:40",
++                                    evidence="Priya will send the audit checklist to the team by Friday")])
++        out, rep = validate(obj, TRANSCRIPT, [])
++        self.assertEqual(out["decisions"][0]["review_flag"], "")
++        self.assertEqual(out["action_items"][0]["owner"], "Priya")
++        self.assertEqual(out["action_items"][0]["deadline"], "Friday")
++        self.assertEqual(rep["removed_no_evidence"], [])
++
++    def test_decision_without_evidence_removed_and_reported(self):
++        out, rep = validate(self.base(decisions=[self.item("decision", "Buy a new server")]), TRANSCRIPT, [])
++        self.assertEqual(out["decisions"], [])
++        self.assertTrue(any("Buy a new server" in f for f in out["review_flags"]))
++
++    def test_fabricated_evidence_flagged_not_trusted(self):
++        obj = self.base(decisions=[self.item("decision", "Hire ten engineers", timestamp="00:01:00",
++                                             evidence="The board approved hiring ten engineers immediately")])
++        out, _ = validate(obj, TRANSCRIPT, [])
++        self.assertIn("could not be verified", out["decisions"][0]["review_flag"])
++
++    def test_invented_owner_and_deadline_reset(self):
++        obj = self.base(action_items=[self.item(
++            "action", "Send checklist", owner="Suresh", deadline="31 December", timestamp="00:01:40",
++            evidence="Priya will send the audit checklist to the team by Friday")])
++        out, rep = validate(obj, TRANSCRIPT, [])
++        self.assertEqual(out["action_items"][0]["owner"], ai.DEFAULT_OWNER)
++        self.assertEqual(out["action_items"][0]["deadline"], ai.DEFAULT_DEADLINE)
++        self.assertEqual(len(rep["owners_reset"]), 1)
++        self.assertEqual(len(rep["deadlines_reset"]), 1)
++
++    def test_next_meeting_kept_only_when_stated(self):
++        stated, _ = validate(self.base(next_meeting=["Meet again next Tuesday to confirm audit status"]), TRANSCRIPT, [])
++        self.assertEqual(len(stated["next_meeting"]), 1)
++        no_meeting = [seg(0, 5, "We talked about the budget only.")]
++        dropped, rep = validate(self.base(next_meeting=["Next meeting on Monday"]), no_meeting, [])
++        self.assertEqual(dropped["next_meeting"], [])
++        self.assertEqual(len(rep["next_meeting_dropped"]), 1)
++
++    def test_timestamp_parsing(self):
++        self.assertEqual(parse_ts_seconds("00:01:12"), 72)
++        self.assertEqual(parse_ts_seconds("[00:01:12 - 00:01:25]"), 72)
++        self.assertEqual(parse_ts_seconds("1:12"), 72)
++        self.assertEqual(parse_ts_seconds("72.5"), 72.5)
++        self.assertIsNone(parse_ts_seconds("later"))
++
++
++class Docx(unittest.TestCase):
++    def test_all_sections_present(self):
++        j, t, _ = fake_llm()
++        out = ai.run_understanding({}, TRANSCRIPT, [], j, t, max_chars=200)
++        with tempfile.TemporaryDirectory() as d:
++            p = Path(d) / "m.docx"
++            build_mom_doc({"title": "Weekly Review", "date": "2026-10-02",
++                           "participants": [{"name": "Ravi", "designation": "Lead"}]}, out).save(p)
++            headings = [x.text for x in Document(p).paragraphs if x.style.name.startswith("Heading")]
++        for h in ("Executive Summary", "Complete Conversation Summary", "Key Discussion Points", "Decisions",
++                  "Action Items", "Commitments", "Open Questions / Pending Follow-up", "Next Meeting", "Review Flags"):
++            self.assertIn(h, headings)
++
++
++class Status(unittest.TestCase):
++    def test_status_file_contract_and_failure_isolation(self):
++        class Broken:
++            def upsert_text(self, *a, **k):
++                raise MomError("MOM-013", "boom")
++        with tempfile.TemporaryDirectory() as d:
++            r = StatusReporter(Broken(), "F", "M1", Path(d) / "s.json", "ai")
++            r.update("ANALYZING", "working", 62)       # must not raise even though upload fails
++            r.fail("MOM-008", 'Ollama down "private_key": "-----BEGIN PRIVATE KEY-----abc-----END PRIVATE KEY-----"')
++            data = json.loads((Path(d) / "s.json").read_text())
++        for k in ("meeting_id", "status", "progress_percent", "current_stage", "message", "started_at",
++                  "updated_at", "completed_at", "error_code", "error_message"):
++            self.assertIn(k, data)
++        self.assertEqual((data["status"], data["error_code"]), ("FAILED", "MOM-008"))
++        self.assertNotIn("BEGIN PRIVATE", data["error_message"])
++
++    def test_sanitize_truncates(self):
++        self.assertLessEqual(len(sanitize("x" * 5000)), 500)
++
++
++class EndToEnd(unittest.TestCase):
++    """Runs every stage with whisper/ffmpeg/Ollama faked and Drive in memory."""
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.cwd = os.getcwd()
++        os.chdir(self.tmp.name)
++        self.store = FakeStore()
++        self.store.meta["AUDIO1"] = {"id": "AUDIO1", "name": "meeting.m4a", "mimeType": "audio/mp4",
++                                     "parents": ["AUD"], "createdTime": "2026-10-01T10:00:00Z"}
++        self.store.upsert_text("MEET", "meeting_metadata.json", json.dumps({"title": "Weekly Review", "date": "2026-10-02"}))
++        os.environ.update(MEETING_ID="M1", AUDIO_FOLDER_ID="AUD", MEETING_FOLDER_ID="MEET", AUDIO_FILE_ID="AUDIO1")
++        whisper_data = {"transcription": [{"offsets": {"from": int(s["start"] * 1000), "to": int(s["end"] * 1000)},
++                                           "text": s["text"]} for s in TRANSCRIPT]}
++        self.orig = pm.whisper_json, pm.run_cmd, pm.DriveStore.from_env, ai.make_ollama_fns
++        pm.whisper_json = lambda *a, **k: whisper_data
++        pm.run_cmd = lambda cmd, code: Path(cmd[-1]).write_bytes(b"wav")
++        pm.DriveStore.from_env = classmethod(lambda cls: self.store)
++        ai.make_ollama_fns = lambda model: fake_llm()[:2]
++
++    def tearDown(self):
++        pm.whisper_json, pm.run_cmd, pm.DriveStore.from_env, ai.make_ollama_fns = self.orig
++        os.chdir(self.cwd)
++        self.tmp.cleanup()
++
++    def run_main(self, stage):
++        sys.argv = ["process_meeting.py", "--stage", stage]
++        try:
++            pm.main()
++        except SystemExit as e:
++            return e.code
++        return 0
++
++    def status(self):
++        return json.loads(self.store.text("MEET", "PROCESSING_STATUS.json"))
++
++    def test_full_pipeline_completes_with_all_outputs(self):
++        for stage in ("init", "whisper", "translation", "ai", "mom"):
++            self.assertEqual(self.run_main(stage), 0, stage)
++        st = self.status()
++        self.assertEqual((st["status"], st["progress_percent"]), ("COMPLETED", 100))
++        self.assertIsNotNone(st["completed_at"])
++        expected = {
++            "MEET/TRANSCRIPT": ["Original Transcript.txt", "Transcript.json"],
++            "MEET/TRANSLATION": ["English Translation.txt", "Translation.json"],
++            "MEET/AI": ["AI Evidence.json", "AI Understanding.json", "Complete Conversation Summary.txt", "Executive Summary.txt"],
++            "MEET/MOM": ["Weekly Review - AI_MOM.docx", "PROCESSING_COMPLETE.json"],
++        }
++        for folder, names in expected.items():
++            for n in names:
++                self.assertIn((folder, n), self.store.files, f"{folder}/{n} missing")
++        evidence = json.loads(self.store.text("MEET/AI", "AI Evidence.json"))
++        self.assertTrue(evidence["validated"])
++        self.assertTrue(evidence["summary"])                       # mobile app compatibility
++        self.assertNotEqual(evidence["executive_summary"], evidence["complete_conversation_summary"])
++        self.assertIn("[00:01:00", self.store.text("MEET/TRANSCRIPT", "Original Transcript.txt"))
++        self.assertFalse(Path(".meeting_work/source_audio").exists())   # audio removed after translation
++        self.assertFalse(Path(".meeting_work/meeting.wav").exists())
++
++    def test_plural_folder_names_are_reused_not_duplicated(self):
++        self.store.meta["T"] = {"id": "T", "name": "TRANSCRIPTS", "mimeType": FOLDER, "parents": ["MEET"]}
++        self.store.meta["L"] = {"id": "L", "name": "TRANSLATIONS", "mimeType": FOLDER, "parents": ["MEET"]}
++        folders = pm.resolve_folders(self.store, "MEET")
++        self.assertEqual((folders["TRANSCRIPT"], folders["TRANSLATION"]), ("T", "L"))
++        self.assertEqual(folders["AI"], "MEET/AI")                    # missing ones are created
++
++    def test_status_is_per_stage_not_completed_after_first_stage(self):
++        """Regression: each workflow step is a separate process; only the last may report COMPLETED."""
++        self.run_main("init")
++        self.run_main("whisper")
++        st = self.status()
++        self.assertNotEqual(st["status"], "COMPLETED")
++        self.assertLess(st["progress_percent"], 100)
++        self.run_main("translation")
++        self.assertNotEqual(self.status()["status"], "COMPLETED")
++        for stage in ("ai", "mom"):
++            self.run_main(stage)
++        self.assertEqual(self.status()["stage"], "COMPLETED")         # web app reads `stage`
++
++    def test_rerun_overwrites_instead_of_duplicating(self):
++        for _ in range(2):
++            for stage in ("init", "whisper"):
++                self.run_main(stage)
++        self.assertEqual(sum(1 for k in self.store.files if k[1] == "Transcript.json"), 1)
++
++    def test_failure_writes_status_with_error_code(self):
++        os.environ["AUDIO_FILE_ID"] = ""
++        self.store.meta.clear()                                      # no audio anywhere
++        self.assertEqual(self.run_main("whisper"), 1)
++        st = self.status()
++        self.assertEqual((st["status"], st["error_code"]), ("FAILED", "MOM-001"))
++
++    def test_fail_stage_marks_failed_but_never_overwrites_completed(self):
++        os.environ.update(FAILED_STEP="Prepare Whisper runtime", FAILED_ERROR_CODE="MOM-005")
++        self.run_main("fail")
++        self.assertEqual((self.status()["status"], self.status()["error_code"]), ("FAILED", "MOM-005"))
++        for stage in ("init", "whisper", "translation", "ai", "mom"):
++            self.run_main(stage)
++        self.run_main("fail")
++        self.assertEqual(self.status()["status"], "COMPLETED")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/processor/tests/test_transcript_gate.py b/processor/tests/test_transcript_gate.py
+new file mode 100644
+index 0000000..6610563
+--- /dev/null
++++ b/processor/tests/test_transcript_gate.py
+@@ -0,0 +1,304 @@
++"""Audio health + transcript quality gate + Whisper fallback (offline).
++
++    python -m unittest discover -s processor/tests -v
++"""
++import json
++import os
++import random
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "scripts"))
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++
++import process_meeting as pm  # noqa: E402
++from pipeline.errors import ERROR_NAMES, MomError  # noqa: E402
++from pipeline.speech_quality import (  # noqa: E402
++    assess_audio, assess_transcript, audio_report_from_ffmpeg)
++from test_pipeline import TRANSCRIPT, FakeStore, fake_llm  # noqa: E402
++
++TELUGU_WORDS = ("నమస్కారం ఈ రోజు సమావేశంలో రెన్యువల్ బ్యాక్‌లాగ్ గురించి మాట్లాడదాం పాలసీ కస్టమర్ రిపోర్ట్ "
++                "శుక్రవారం లోపు పంపిస్తాను అవును సరే తరువాత చూద్దాం ఖర్చు బడ్జెట్ ఆమోదం కావాలి వెంటనే "
++                "టీమ్ వాహనం బీమా క్లెయిమ్ పెండింగ్ సమస్య పరిష్కారం ఫాలో అప్ అవసరం").split()
++
++
++def healthy_segments(n=60, seed=7):
++    """Natural-looking speech: a Zipf-like vocabulary of ~400 words (common words repeat, most are rare)."""
++    rnd = random.Random(seed)
++    vocab = [f"{TELUGU_WORDS[i % len(TELUGU_WORDS)]}{i // len(TELUGU_WORDS) or ''}" for i in range(400)]
++    weights = [1.0 / (rank + 1) for rank in range(len(vocab))]
++    return [{"start": i * 10.0, "end": i * 10.0 + 9,
++             "text": " ".join(rnd.choices(vocab, weights, k=9))} for i in range(n)]
++
++
++def looping_segments(n=60):
++    return [{"start": i * 10.0, "end": i * 10.0 + 9, "text": "అది మీరు చెప్పండి అది మీరు చెప్పండి"} for i in range(n)]
++
++
++FFMPEG_OK = """  Duration: 00:10:02.50, start: 0.000000, bitrate: 256 kb/s
++[silencedetect @ 0x1] silence_duration: 4.5
++[silencedetect @ 0x1] silence_duration: 10.5
++[Parsed_volumedetect_0 @ 0x2] mean_volume: -27.3 dB
++[Parsed_volumedetect_0 @ 0x2] max_volume: -3.1 dB
++"""
++
++
++class AudioHealth(unittest.TestCase):
++    def test_report_parsing(self):
++        r = audio_report_from_ffmpeg(FFMPEG_OK)
++        self.assertEqual((r["duration_seconds"], r["mean_volume_db"], r["max_volume_db"]), (602.5, -27.3, -3.1))
++        self.assertEqual(r["silence_seconds"], 15.0)
++        self.assertAlmostEqual(r["silence_ratio"], 0.025, places=3)
++
++    def test_normal_audio_passes(self):
++        self.assertEqual(assess_audio(audio_report_from_ffmpeg(FFMPEG_OK)), ([], []))
++
++    def test_silent_and_tiny_audio_fail(self):
++        problems, _ = assess_audio({"duration_seconds": 600, "max_volume_db": -70.0})
++        self.assertTrue(any("silent" in p for p in problems))
++        problems, _ = assess_audio({"duration_seconds": 1.0, "max_volume_db": -5.0})
++        self.assertTrue(any("seconds long" in p for p in problems))
++
++    def test_quiet_audio_only_warns(self):
++        problems, warnings = assess_audio({"duration_seconds": 600, "mean_volume_db": -50.0, "max_volume_db": -20.0})
++        self.assertEqual(problems, [])
++        self.assertEqual(len(warnings), 1)
++
++    def test_unknown_metrics_never_fail(self):
++        self.assertEqual(assess_audio({}), ([], []))
++
++
++class QualityGate(unittest.TestCase):
++    def test_varied_telugu_passes(self):
++        verdict = assess_transcript(healthy_segments(), audio_seconds=600)
++        self.assertTrue(verdict["passed"], verdict["problems"])
++
++    def test_hour_long_meeting_is_not_a_false_positive(self):
++        verdict = assess_transcript(healthy_segments(n=360, seed=3), audio_seconds=3600)   # ~3,200 words
++        self.assertTrue(verdict["passed"], verdict["problems"])
++
++    def test_loop_covering_a_third_of_a_long_recording_fails(self):
++        segs = healthy_segments(n=120, seed=5)
++        for i in range(40, 80):
++            segs[i]["text"] = "అది మీరు చెప్పండి అది మీరు చెప్పండి అవును సరే"
++        self.assertFalse(assess_transcript(segs, audio_seconds=1200)["passed"])
++
++    def test_normal_english_passes(self):
++        self.assertTrue(assess_transcript(TRANSCRIPT, audio_seconds=200)["passed"])
++
++    def test_repetition_loop_fails(self):
++        verdict = assess_transcript(looping_segments(), audio_seconds=600)
++        self.assertFalse(verdict["passed"])
++        self.assertGreaterEqual(len(verdict["problems"]), 2)
++
++    def test_loop_with_slight_variation_still_fails(self):
++        segs = [{"start": i * 10.0, "end": i * 10.0 + 9,
++                 "text": "అది మీరు చెప్పండి అది మీరు చెప్పండి" + (" అవును" if i % 7 == 0 else "")} for i in range(60)]
++        self.assertFalse(assess_transcript(segs, audio_seconds=600)["passed"])
++
++    def test_run_of_duplicates_in_middle_of_good_text_fails(self):
++        segs = healthy_segments(30)
++        for i in range(10, 17):
++            segs[i]["text"] = "ధన్యవాదాలు చూసినందుకు"
++        verdict = assess_transcript(segs, audio_seconds=300)
++        self.assertFalse(verdict["passed"])
++        self.assertTrue(any("consecutive" in p for p in verdict["problems"]))
++
++    def test_transcript_stopping_early_fails(self):
++        verdict = assess_transcript(healthy_segments(5), audio_seconds=1200)  # ends at 49s of a 20 min recording
++        self.assertFalse(verdict["passed"])
++        self.assertTrue(any("ends at" in p for p in verdict["problems"]))
++
++    def test_short_real_utterance_is_not_flagged_as_loop(self):
++        segs = [{"start": 0, "end": 4, "text": "Yes, that works for everyone on the team."}]
++        self.assertTrue(assess_transcript(segs, audio_seconds=5)["passed"])
++
++    def test_empty_and_garbage(self):
++        self.assertFalse(assess_transcript([], audio_seconds=100)["passed"])
++        garbage = [{"start": 0, "end": 5, "text": "\ufffd" * 80}]
++        self.assertFalse(assess_transcript(garbage)["passed"])
++
++    def test_error_codes_registered(self):
++        self.assertEqual(ERROR_NAMES["MOM-019"], "Transcript quality failure")
++        self.assertEqual(ERROR_NAMES["MOM-020"], "Audio health failure")
++
++
++class Orchestration(unittest.TestCase):
++    """Drives the real stages with Whisper, ffmpeg, Drive and Ollama replaced by fakes."""
++
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.cwd = os.getcwd()
++        os.chdir(self.tmp.name)
++        for name in ("primary.bin", "fallback.bin"):
++            Path(name).write_bytes(b"x")
++        self.store = FakeStore()
++        self.store.meta["AUDIO1"] = {"id": "AUDIO1", "name": "m.m4a", "mimeType": "audio/mp4",
++                                     "parents": ["AUD"], "createdTime": "2026-10-01T10:00:00Z"}
++        self.store.upsert_text("MEET", "meeting_metadata.json", json.dumps({"title": "T", "language_hint": "auto"}))
++        os.environ.update(MEETING_ID="M1", AUDIO_FOLDER_ID="AUD", MEETING_FOLDER_ID="MEET", AUDIO_FILE_ID="AUDIO1")
++        os.environ.pop("WHISPER_LANGUAGE", None)
++        self.saved = (pm.whisper_json, pm.run_cmd, pm.DriveStore.from_env, pm.WHISPER_MODEL, pm.FALLBACK_MODEL, pm.audio_health)
++        pm.WHISPER_MODEL, pm.FALLBACK_MODEL = Path("primary.bin"), Path("fallback.bin")
++        pm.run_cmd = lambda cmd, code: Path(cmd[-1]).write_bytes(b"wav")
++        pm.DriveStore.from_env = classmethod(lambda cls: self.store)
++        pm.audio_health = lambda wav, status=None: ({"duration_seconds": 600.0}, [])
++        self.calls = []
++
++    def tearDown(self):
++        (pm.whisper_json, pm.run_cmd, pm.DriveStore.from_env, pm.WHISPER_MODEL, pm.FALLBACK_MODEL, pm.audio_health) = self.saved
++        os.chdir(self.cwd)
++        self.tmp.cleanup()
++
++    @staticmethod
++    def whisper_data(segments, lang="te"):
++        return {"result": {"language": lang}, "transcription": [
++            {"offsets": {"from": int(s["start"] * 1000), "to": int(s["end"] * 1000)}, "text": s["text"]} for s in segments]}
++
++    def install_whisper(self, by_model):
++        def fake(wav, base, translate=False, model=None, language="auto"):
++            self.calls.append({"model": Path(model).name if model else "primary.bin", "translate": translate, "language": language})
++            return by_model[(Path(model).name if model else "primary.bin", translate)]
++        pm.whisper_json = fake
++
++    def run_stage(self, stage):
++        sys.argv = ["process_meeting.py", "--stage", stage]
++        try:
++            pm.main()
++        except SystemExit as e:
++            return e.code
++        return 0
++
++    def status(self):
++        return json.loads(self.store.text("MEET", "PROCESSING_STATUS.json"))
++
++    def test_loop_on_primary_recovers_with_fallback_model(self):
++        good = self.whisper_data(healthy_segments())
++        self.install_whisper({("primary.bin", False): self.whisper_data(looping_segments()), ("fallback.bin", False): good})
++        self.assertEqual(self.run_stage("whisper"), 0)
++        saved = json.loads(self.store.text("MEET/TRANSCRIPT", "Transcript.json"))
++        self.assertEqual(saved["_quality"]["model_used"], "fallback.bin")
++        self.assertEqual([a["passed"] for a in saved["_quality"]["attempts"]], [False, True])
++        self.assertEqual([c["model"] for c in self.calls], ["primary.bin", "fallback.bin"])
++        self.assertNotIn("అది మీరు చెప్పండి అది మీరు చెప్పండి", self.store.text("MEET/TRANSCRIPT", "Original Transcript.txt"))
++
++    def test_loop_on_every_model_fails_with_mom019_and_saves_nothing(self):
++        bad = self.whisper_data(looping_segments())
++        self.install_whisper({("primary.bin", False): bad, ("fallback.bin", False): bad})
++        self.assertEqual(self.run_stage("whisper"), 1)
++        st = self.status()
++        self.assertEqual((st["status"], st["error_code"]), ("FAILED", "MOM-019"))
++        self.assertNotIn(("MEET/TRANSCRIPT", "Original Transcript.txt"), self.store.files)
++        self.assertNotIn(("MEET/TRANSCRIPT", "Transcript.json"), self.store.files)
++
++    def test_without_fallback_model_failure_says_so(self):
++        pm.FALLBACK_MODEL = Path("missing.bin")
++        self.install_whisper({("primary.bin", False): self.whisper_data(looping_segments())})
++        self.assertEqual(self.run_stage("whisper"), 1)
++        self.assertIn("no stronger fallback model", self.status()["error_message"])
++
++    def test_good_primary_never_touches_fallback(self):
++        self.install_whisper({("primary.bin", False): self.whisper_data(healthy_segments())})
++        self.assertEqual(self.run_stage("whisper"), 0)
++        self.assertEqual([c["model"] for c in self.calls], ["primary.bin"])
++
++    def test_language_hint_from_metadata_and_env(self):
++        self.store.upsert_text("MEET", "meeting_metadata.json", json.dumps({"title": "T", "language_hint": "te"}))
++        self.install_whisper({("primary.bin", False): self.whisper_data(healthy_segments())})
++        self.run_stage("whisper")
++        self.assertEqual(self.calls[0]["language"], "te")
++        for bad in ("en/te/hi", "telugu-hindi", ""):
++            self.assertEqual(pm.language_hint(bad), "auto")
++        os.environ["WHISPER_LANGUAGE"] = "hi"
++        self.assertEqual(pm.language_hint("te"), "hi")
++
++    def test_english_recording_skips_second_whisper_pass(self):
++        pm.audio_health = lambda wav, status=None: ({"duration_seconds": 200.0}, [])
++        self.install_whisper({("primary.bin", False): self.whisper_data(TRANSCRIPT, lang="en")})
++        self.assertEqual(self.run_stage("whisper"), 0)
++        self.assertEqual(self.run_stage("translation"), 0)
++        self.assertEqual([c["translate"] for c in self.calls], [False])      # no -tr pass
++        self.assertIn(("MEET/TRANSLATION", "Translation.json"), self.store.files)
++
++    def test_translation_uses_primary_model_never_turbo(self):
++        self.install_whisper({("primary.bin", False): self.whisper_data(healthy_segments()),
++                              ("primary.bin", True): self.whisper_data(TRANSCRIPT, lang="te")})
++        self.run_stage("whisper")
++        self.assertEqual(self.run_stage("translation"), 0)
++        self.assertEqual(self.calls[-1], {"model": "primary.bin", "translate": True, "language": "auto"})
++
++    def test_looping_translation_is_discarded_not_fed_to_ai(self):
++        self.install_whisper({("primary.bin", False): self.whisper_data(healthy_segments()),
++                              ("primary.bin", True): self.whisper_data(looping_segments())})
++        self.run_stage("whisper")
++        self.assertEqual(self.run_stage("translation"), 0)                    # pipeline continues on the good transcript
++        saved = json.loads(self.store.text("MEET/TRANSLATION", "Translation.json"))
++        self.assertFalse(saved["_quality"]["passed"])
++        self.assertEqual(saved["transcription"], [])
++        self.assertIn("No separate English translation", self.store.text("MEET/TRANSLATION", "English Translation.txt"))
++        warnings = json.loads(Path(".meeting_work/audio_warnings.json").read_text())
++        self.assertTrue(any("translation was discarded" in w for w in warnings))
++
++    def test_silent_audio_fails_with_mom020_before_whisper(self):
++        def silent(wav, status=None):
++            raise MomError("MOM-020", "Audio health check failed: silent")
++        pm.audio_health = silent
++        self.install_whisper({})
++        self.assertEqual(self.run_stage("whisper"), 1)
++        self.assertEqual(self.status()["error_code"], "MOM-020")
++        self.assertEqual(self.calls, [])
++
++
++class WhisperCommand(unittest.TestCase):
++    def test_flags_reach_whisper_cli(self):
++        with tempfile.TemporaryDirectory() as d:
++            cwd = os.getcwd()
++            os.chdir(d)
++            try:
++                for name in ("whisper-cli", "m.bin", "vad.bin"):
++                    Path(name).write_bytes(b"x")
++                saved = pm.WHISPER, pm.WHISPER_MODEL, pm.VAD_MODEL, pm.run_cmd
++                pm.WHISPER, pm.WHISPER_MODEL, pm.VAD_MODEL = Path("whisper-cli"), Path("m.bin"), Path("vad.bin")
++                seen = {}
++
++                def fake_run(cmd, code):
++                    seen["cmd"] = cmd
++                    Path(cmd[cmd.index("-of") + 1] + ".json").write_text(json.dumps({"transcription": []}))
++                pm.run_cmd = fake_run
++                pm.whisper_json(Path("a.wav"), Path("out"), language="te")
++                cmd = seen["cmd"]
++                for flag in ("-nf", "--vad", "-sns"):
++                    self.assertIn(flag, cmd)
++                self.assertEqual(cmd[cmd.index("-mc") + 1], "0")
++                self.assertEqual(cmd[cmd.index("-l") + 1], "te")
++                self.assertIn("-oj", cmd)
++                self.assertNotIn("-ojf", cmd)       # token-level JSON (-ojf) is not needed and adds per-token text that can carry partial UTF-8
++                self.assertNotIn("-tr", cmd)
++                pm.whisper_json(Path("a.wav"), Path("out"), translate=True)
++                self.assertIn("-tr", seen["cmd"])
++            finally:
++                pm.WHISPER, pm.WHISPER_MODEL, pm.VAD_MODEL, pm.run_cmd = saved
++                os.chdir(cwd)
++
++    def test_missing_vad_model_is_infrastructure_error(self):
++        with tempfile.TemporaryDirectory() as d:
++            cwd = os.getcwd()
++            os.chdir(d)
++            saved = pm.WHISPER, pm.WHISPER_MODEL, pm.VAD_MODEL
++            try:
++                for name in ("whisper-cli", "m.bin"):
++                    Path(name).write_bytes(b"x")
++                pm.WHISPER, pm.WHISPER_MODEL, pm.VAD_MODEL = Path("whisper-cli"), Path("m.bin"), Path("none.bin")
++                with self.assertRaises(MomError) as cm:
++                    pm.whisper_json(Path("a.wav"), Path("out"))
++                self.assertEqual(cm.exception.code, "MOM-006")
++            finally:
++                pm.WHISPER, pm.WHISPER_MODEL, pm.VAD_MODEL = saved
++                os.chdir(cwd)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
