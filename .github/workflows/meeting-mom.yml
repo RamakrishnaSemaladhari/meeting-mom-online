@@ -51,49 +51,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r processor/requirements.txt
 
-      - name: Restore Whisper runtime cache
-        id: whisper-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            whisper.cpp/build/bin/whisper-cli
-            whisper.cpp/models/ggml-small-q5_1.bin
-            whisper.cpp/models/ggml-silero-v5.1.2.bin
-          key: ${{ runner.os }}-whisper-runtime-v8-vad
-
-      - name: Prepare Whisper runtime
-        run: |
-          mkdir -p whisper.cpp/build/bin whisper.cpp/models
-
-          if [ ! -x whisper.cpp/build/bin/whisper-cli ]; then
-            echo "Building Whisper runtime for reusable cache..."
-            git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
-            cmake -B whisper.cpp-src/build whisper.cpp-src -DBUILD_SHARED_LIBS=OFF
-            cmake --build whisper.cpp-src/build --target whisper-cli -j --config Release
-            cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
-            chmod +x whisper.cpp/build/bin/whisper-cli
-            echo "Whisper binary dependency check:"
-            echo "Whisper runtime linkage:"
-            ldd whisper.cpp/build/bin/whisper-cli || true
-            rm -rf whisper.cpp-src
-          else
-            echo "Whisper executable already cached."
-          fi
-
-          if [ ! -s whisper.cpp/models/ggml-small-q5_1.bin ]; then
-            curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin \
-              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
-          else
-            echo "Whisper model already cached."
-          fi
-
-          if [ -s whisper.cpp/models/ggml-silero-v5.1.2.bin ]; then
-            echo "Whisper VAD model already cached."
-          else
-            echo "Downloading Silero VAD model once for the cache..."
-            curl -L --fail --retry 3 -o whisper.cpp/models/ggml-silero-v5.1.2.bin \
-              https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
-          fi
+      - name: Whisper runtime (cached build, models and VAD)
+        uses: ./.github/actions/whisper-runtime
 
       - name: Restore AI model cache
         id: ai-cache
@@ -240,47 +199,8 @@ jobs:
 
       # Whisper.cpp is expensive to compile, so cache the final executable
       # and model. The first run builds/downloads them; later meetings restore them.
-      - name: Restore Whisper runtime cache
-        id: whisper-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            whisper.cpp/build/bin/whisper-cli
-            whisper.cpp/models/ggml-small-q5_1.bin
-          key: ${{ runner.os }}-whisper-runtime-v8-vad
-
-      - name: Prepare Whisper runtime
-        run: |
-          mkdir -p whisper.cpp/build/bin whisper.cpp/models
-
-          if [ -x whisper.cpp/build/bin/whisper-cli ]; then
-            echo "Whisper executable restored from cache."
-          else
-            echo "Whisper cache miss. Building Whisper.cpp once for the cache..."
-            git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
-            cmake -B whisper.cpp-src/build whisper.cpp-src -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
-            cmake --build whisper.cpp-src/build --target whisper-cli -j --config Release
-            cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
-            chmod +x whisper.cpp/build/bin/whisper-cli
-            rm -rf whisper.cpp-src
-          fi
-
-          echo "Whisper runtime linkage:"
-          ldd whisper.cpp/build/bin/whisper-cli || true
-          whisper.cpp/build/bin/whisper-cli --help >/dev/null 2>&1 || (echo "ERROR: whisper-cli does not start" && exit 1)
-
-          if [ -f whisper.cpp/models/ggml-small-q5_1.bin ]; then
-            echo "Whisper model restored from cache."
-          else
-            echo "Downloading Whisper model once for the cache..."
-            curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin \
-              https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
-          fi
-
-          test -x whisper.cpp/build/bin/whisper-cli
-          test -s whisper.cpp/models/ggml-small-q5_1.bin
-          test -s whisper.cpp/models/ggml-silero-v5.1.2.bin
-          echo "Whisper runtime + VAD ready."
+      - name: Whisper runtime (cached build, models and VAD)
+        uses: ./.github/actions/whisper-runtime
 
       # Ollama model storage is also cached. The Ollama executable itself is
       # small and is installed quickly; the large model does not need to be
