@@ -16,6 +16,9 @@ ERROR_NAMES = {
     "MOM-013": "Drive upload failure",
     "MOM-014": "Status update failure",
     "MOM-015": "Mobile result retrieval failure",
+    # Extensions to the spec table (MOM-016..018 are reserved for the offline system).
+    "MOM-019": "Transcript quality failure",
+    "MOM-020": "Audio health failure",
 }
 
 STAGE_DEFAULT_CODE = {

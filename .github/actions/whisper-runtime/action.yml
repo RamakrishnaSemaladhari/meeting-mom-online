@@ -1,0 +1,95 @@
+name: Whisper runtime
+description: >
+  Restores or builds whisper-cli, the primary model and the Silero VAD model, and
+  best-effort caches a stronger fallback model. Used by BOTH the cache warm-up job
+  and the processing job so their cache keys and paths can never drift apart
+  (a different `path:` list makes actions/cache treat the entries as different caches).
+
+runs:
+  using: composite
+  steps:
+    - name: Restore Whisper runtime cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          whisper.cpp/build/bin/whisper-cli
+          whisper.cpp/models/ggml-small-q5_1.bin
+          whisper.cpp/models/ggml-silero-v5.1.2.bin
+        key: ${{ runner.os }}-whisper-runtime-v9-vad
+
+    # Used only when the primary transcript fails the quality gate. Separate cache so a
+    # failed download can never invalidate the primary runtime cache.
+    - name: Restore Whisper fallback model cache
+      uses: actions/cache@v4
+      with:
+        path: whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin
+        key: ${{ runner.os }}-whisper-fallback-large-v3-turbo-q5_0-v1
+
+    - name: Prepare Whisper runtime
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p whisper.cpp/build/bin whisper.cpp/models
+        HF=https://huggingface.co
+
+        if [ -x whisper.cpp/build/bin/whisper-cli ]; then
+          echo "Whisper executable restored from cache."
+        else
+          echo "Whisper cache miss. Building whisper.cpp once for the cache..."
+          git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
+          cmake -B whisper.cpp-src/build whisper.cpp-src -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+          cmake --build whisper.cpp-src/build --target whisper-cli -j"$(nproc)" --config Release
+          cp whisper.cpp-src/build/bin/whisper-cli whisper.cpp/build/bin/whisper-cli
+          chmod +x whisper.cpp/build/bin/whisper-cli
+          rm -rf whisper.cpp-src
+        fi
+
+        echo "Whisper runtime linkage:"
+        ldd whisper.cpp/build/bin/whisper-cli || true
+        if ldd whisper.cpp/build/bin/whisper-cli 2>/dev/null | grep -Eq "libwhisper|libggml"; then
+          echo "ERROR: whisper-cli depends on libwhisper/libggml shared libraries (stale cache or shared build)"
+          exit 1
+        fi
+        whisper.cpp/build/bin/whisper-cli --help >/dev/null 2>&1 || { echo "ERROR: whisper-cli does not start"; exit 1; }
+        # The quality flags must exist in this build, otherwise Whisper would reject the command line.
+        for flag in --vad --vad-model --vad-max-speech-duration-s --no-fallback --entropy-thold --logprob-thold --max-context --suppress-nst; do
+          whisper.cpp/build/bin/whisper-cli --help 2>&1 | grep -q -- "$flag" || { echo "ERROR: whisper-cli does not support $flag"; exit 1; }
+        done
+
+        if [ -s whisper.cpp/models/ggml-small-q5_1.bin ]; then
+          echo "Primary Whisper model restored from cache."
+        else
+          echo "Downloading primary Whisper model once for the cache..."
+          curl -L --fail --retry 3 -o whisper.cpp/models/ggml-small-q5_1.bin.part \
+            "$HF/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
+          mv whisper.cpp/models/ggml-small-q5_1.bin.part whisper.cpp/models/ggml-small-q5_1.bin
+        fi
+
+        if [ -s whisper.cpp/models/ggml-silero-v5.1.2.bin ]; then
+          echo "Silero VAD model restored from cache."
+        else
+          echo "Downloading Silero VAD model once for the cache..."
+          curl -L --fail --retry 3 -o whisper.cpp/models/ggml-silero-v5.1.2.bin.part \
+            "$HF/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin"
+          mv whisper.cpp/models/ggml-silero-v5.1.2.bin.part whisper.cpp/models/ggml-silero-v5.1.2.bin
+        fi
+
+        test -x whisper.cpp/build/bin/whisper-cli
+        test -s whisper.cpp/models/ggml-small-q5_1.bin
+        test -s whisper.cpp/models/ggml-silero-v5.1.2.bin
+
+        # Best effort: never fail the run because the optional model could not be fetched.
+        if [ -s whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin ]; then
+          echo "Fallback Whisper model restored from cache."
+        else
+          echo "Downloading fallback Whisper model (large-v3-turbo-q5_0, ~547 MiB)..."
+          if curl -L --fail --retry 3 -o whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin.part \
+               "$HF/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin" \
+             && [ "$(stat -c%s whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin.part)" -gt 400000000 ]; then
+            mv whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin.part whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin
+          else
+            echo "WARNING: fallback model unavailable; the quality gate will fail instead of retrying."
+            rm -f whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin.part
+          fi
+        fi
+        echo "Whisper runtime + VAD ready."

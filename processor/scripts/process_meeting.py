@@ -24,11 +24,15 @@ from pipeline.docx_builder import build_mom_doc
 from pipeline.drive_store import DriveStore, select_audio
 from pipeline.errors import STAGE_DEFAULT_CODE, MomError
 from pipeline.status import StatusReporter, now
+from pipeline.speech_quality import assess_audio, assess_transcript, audio_report_from_ffmpeg
 from pipeline.validation import validate
 
 WORK = Path(".meeting_work")
 WHISPER = Path("whisper.cpp/build/bin/whisper-cli")
 WHISPER_MODEL = Path(os.environ.get("WHISPER_MODEL_PATH", "whisper.cpp/models/ggml-small-q5_1.bin"))
+# Optional stronger multilingual model, used only when the primary transcript fails the quality gate.
+# (large-v3-turbo cannot translate, so it is used for transcription only.)
+FALLBACK_MODEL = Path(os.environ.get("WHISPER_FALLBACK_MODEL_PATH", "whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin"))
 VAD_MODEL = Path(os.environ.get("WHISPER_VAD_MODEL_PATH", "whisper.cpp/models/ggml-silero-v5.1.2.bin"))
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 JSON_MIME = "application/json"
@@ -97,18 +101,19 @@ class Ctx:
         self.folders, self.status, self.p = folders, status, paths()
 
 
-def whisper_json(wav, base, translate=False):
+def whisper_json(wav, base, translate=False, model=None, language="auto"):
+    model = Path(model) if model else WHISPER_MODEL
     if not WHISPER.exists():
         raise MomError("MOM-005", f"Whisper executable not found at {WHISPER}.")
-    if not WHISPER_MODEL.exists() or WHISPER_MODEL.stat().st_size == 0:
-        raise MomError("MOM-006", f"Whisper model not found at {WHISPER_MODEL}.")
+    if not model.exists() or model.stat().st_size == 0:
+        raise MomError("MOM-006", f"Whisper model not found at {model}.")
     if not VAD_MODEL.exists() or VAD_MODEL.stat().st_size == 0:
         raise MomError("MOM-006", f"Whisper VAD model not found at {VAD_MODEL}.")
 
     # Reduce cross-window repetition/hallucination on long or noisy recordings.
     cmd = [
-        str(WHISPER), "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", "auto",
-        "-ojf", "-of", str(base), "-t", env("WHISPER_THREADS", "4"),
+        str(WHISPER), "-m", str(model), "-f", str(wav), "-l", language,
+        "-oj", "-of", str(base), "-t", env("WHISPER_THREADS", "4"),
         "-mc", "0", "-nf", "-et", env("WHISPER_ENTROPY_THRESHOLD", "2.60"),
         "-lpt", env("WHISPER_LOGPROB_THRESHOLD", "-1.25"),
         "-sns", "-nth", env("WHISPER_NO_SPEECH_THRESHOLD", "0.60"),
@@ -145,44 +150,61 @@ def whisper_json(wav, base, translate=False):
     return data
 
 
-def validate_transcript_quality(segments, diagnostics=None):
-    diagnostics = diagnostics or {}
-    texts = [str(s.get("text", "")).strip() for s in segments if str(s.get("text", "")).strip()]
-    joined = " ".join(texts)
-    compact = re.sub(r"\s+", " ", joined).strip()
-    tokens = compact.lower().split()
+def audio_health(wav, status=None):
+    """Measure level/silence/duration of the 16 kHz WAV. Hard-fails only on unusable audio (MOM-020)."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-i", str(wav),
+             "-af", "volumedetect,silencedetect=noise=-40dB:d=1", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300)
+        report = audio_report_from_ffmpeg(proc.stderr)
+    except Exception as exc:  # the check is advisory when it cannot run
+        log(f"WARNING: audio health check could not run: {exc}")
+        return {}, []
+    problems, warnings = assess_audio(report)
+    log("Audio health: " + json.dumps(report))
+    for w in warnings:
+        log("WARNING: " + w)
+    if problems:
+        raise MomError("MOM-020", "Audio health check failed: " + " ".join(problems))
+    return report, warnings
 
-    if len(compact) < 20:
-        raise MomError("MOM-008", "Transcript quality check failed: less than 20 characters of usable speech were detected.")
 
-    unique_ratio = len(set(tokens)) / max(1, len(tokens))
-    repeated_segment_ratio = 0.0
-    if len(texts) >= 4:
-        normalized = [re.sub(r"\W+", "", t.lower()) for t in texts]
-        counts = {}
-        for item in normalized:
-            if item:
-                counts[item] = counts.get(item, 0) + 1
-        repeated_segment_ratio = max(counts.values(), default=0) / max(1, len(normalized))
+def language_hint(metadata_hint=""):
+    """'auto' or a single ISO code. Never a combined value such as 'en/te/hi'."""
+    value = (env("WHISPER_LANGUAGE") or metadata_hint or "auto").strip().lower()
+    return value if re.fullmatch(r"[a-z]{2,3}", value) else "auto"
 
-    replacement_count = int(diagnostics.get("invalid_utf8_replacements", 0))
-    if len(tokens) >= 40 and (unique_ratio < 0.08 or repeated_segment_ratio >= 0.75):
-        raise MomError(
-            "MOM-008",
-            "Transcript quality check failed: Whisper produced highly repetitive text, "
-            "which is consistent with silence/noise or transcription hallucination. "
-            "Please verify the recording contains clear speech and try again."
-        )
-    if replacement_count > max(10, len(compact) // 200):
-        raise MomError("MOM-008", "Transcript quality check failed: the Whisper output contained too many invalid characters.")
 
-    return {
-        "usable_characters": len(compact),
-        "token_count": len(tokens),
-        "unique_token_ratio": round(unique_ratio, 4),
-        "repeated_segment_ratio": round(repeated_segment_ratio, 4),
-        "invalid_utf8_replacements": replacement_count,
-    }
+def detected_language(data):
+    return str(((data.get("result") or {}).get("language")) or "").lower()
+
+
+def transcribe_with_gate(wav, base_name, audio_seconds, language, status=None):
+    """Primary model -> quality gate -> stronger model -> quality gate -> MOM-019.
+
+    Bad Whisper text must never reach translation or the AI stage."""
+    models = [("primary", WHISPER_MODEL)]
+    if FALLBACK_MODEL.exists() and FALLBACK_MODEL.stat().st_size > 0 and FALLBACK_MODEL != WHISPER_MODEL:
+        models.append(("fallback", FALLBACK_MODEL))
+    attempts = []
+    for index, (label, model) in enumerate(models):
+        if index and status:
+            status.update("TRANSCRIBING", "Transcript quality check failed; retrying with a stronger Whisper model", 30)
+        data = whisper_json(wav, WORK / f"{base_name}_{label}", model=model, language=language)
+        segments = ai_mod.segments_from_whisper(data)
+        verdict = assess_transcript(segments, audio_seconds)
+        attempts.append({"label": label, "model": model.name, "passed": verdict["passed"],
+                         "problems": verdict["problems"], "metrics": verdict["metrics"]})
+        log(f"Transcript quality [{label} {model.name}]: " + json.dumps(attempts[-1]))
+        if verdict["passed"]:
+            data["_quality"] = dict(verdict["metrics"], passed=True, model_used=model.name,
+                                    attempts=attempts, language=detected_language(data))
+            return data, segments
+    reasons = "; ".join(f"{a['model']}: " + ", ".join(a["problems"]) for a in attempts)
+    hint = "" if len(models) > 1 else " (no stronger fallback model is installed)"
+    raise MomError("MOM-019", f"Transcript quality check failed - {reasons}{hint}. "
+                              "Whisper output was discarded; please verify the recording has clear speech.")
 
 
 def timestamped_text(segments):
@@ -230,19 +252,24 @@ def stage_whisper(ctx):
                                    env("STRICT_AUDIO_SELECTION", "false").lower() == "true")
     for w in warnings:
         log("WARNING: " + w)
-    ctx.p["warnings"].write_text(dump(warnings), encoding="utf-8")
     log(f"Downloading meeting audio: {audio.get('name')}")
     st.update("DOWNLOADING", "Downloading audio from Google Drive", 6)
     ctx.store.download(audio["id"], ctx.p["source"])
     st.update("CONVERTING", "Converting audio to 16 kHz mono WAV")
     run_cmd(["ffmpeg", "-y", "-i", str(ctx.p["source"]), "-ar", "16000", "-ac", "1",
              "-c:a", "pcm_s16le", str(ctx.p["wav"])], "MOM-004")
+
+    report, audio_warnings = audio_health(ctx.p["wav"])
+    warnings = warnings + audio_warnings
+    ctx.p["warnings"].write_text(dump(warnings), encoding="utf-8")
+
+    try:
+        hint = language_hint(load_metadata(ctx).get("language_hint", ""))
+    except Exception:
+        hint = language_hint()
     st.update("TRANSCRIBING", "Transcribing with Whisper")
-    data = whisper_json(ctx.p["wav"], WORK / "transcript")
-    segments = ai_mod.segments_from_whisper(data)
-    if not segments:
-        raise MomError("MOM-005", "Whisper produced no transcript segments (silent or unreadable audio?).")
-    data["_quality"] = validate_transcript_quality(segments, data.get("_decoder_diagnostics"))
+    data, segments = transcribe_with_gate(ctx.p["wav"], "transcript", report.get("duration_seconds"), hint, st)
+    data["_audio"] = report
     ctx.p["transcript_json"].write_text(dump(data), encoding="utf-8")
     st.update("TRANSCRIBING", "Saving original transcript", 40)
     ctx.store.upsert_text(ctx.folders["TRANSCRIPT"], "Original Transcript.txt", timestamped_text(segments))
@@ -253,14 +280,43 @@ def stage_translation(ctx):
     st = ctx.status
     if not ctx.p["wav"].exists():
         raise MomError("MOM-007", "WAV audio is missing before the translation stage.")
-    st.update("TRANSLATING", "Translating to English with Whisper")
-    data = whisper_json(ctx.p["wav"], WORK / "translation", translate=True)
-    segments = ai_mod.segments_from_whisper(data)
-    if segments:
-        data["_quality"] = validate_transcript_quality(segments, data.get("_decoder_diagnostics"))
+    transcript = json.loads(ctx.p["transcript_json"].read_text(encoding="utf-8")) if ctx.p["transcript_json"].exists() else {}
+    language = (transcript.get("_quality") or {}).get("language") or detected_language(transcript)
+    folder = ctx.folders["TRANSLATION"]
+
+    if language == "en":
+        # English audio: a second Whisper pass would only repeat the transcript (and the risk of a loop).
+        st.update("TRANSLATING", "Recording is English; no translation needed", 55)
+        data = {"transcription": transcript.get("transcription", []), "result": {"language": "en"},
+                "_quality": {"passed": True, "skipped": "source language is English"}}
+        segments = ai_mod.segments_from_whisper(data)
+    else:
+        st.update("TRANSLATING", "Translating to English with Whisper")
+        try:
+            data = whisper_json(ctx.p["wav"], WORK / "translation", translate=True)
+            segments = ai_mod.segments_from_whisper(data)
+            verdict = assess_transcript(segments, (transcript.get("_audio") or {}).get("duration_seconds"))
+            if not verdict["passed"]:
+                raise MomError("MOM-019", "Translation quality check failed - " + ", ".join(verdict["problems"]))
+            data["_quality"] = dict(verdict["metrics"], passed=True)
+        except MomError as exc:
+            if exc.code not in ("MOM-019", "MOM-007"):
+                raise
+            # Degrade rather than feed a bad translation to the AI: the original transcript passed its gate.
+            log(f"WARNING [{exc.code}] English translation discarded: {exc.message}")
+            data = {"transcription": [], "_quality": {"passed": False, "error_code": exc.code, "reason": exc.message}}
+            segments = []
+            warnings = json.loads(ctx.p["warnings"].read_text(encoding="utf-8")) if ctx.p["warnings"].exists() else []
+            warnings.append("English translation was discarded because it failed its quality check; "
+                            "the AI used the original transcript only. " + exc.message[:200])
+            ctx.p["warnings"].write_text(dump(warnings), encoding="utf-8")
     ctx.p["translation_json"].write_text(dump(data), encoding="utf-8")
-    ctx.store.upsert_text(ctx.folders["TRANSLATION"], "English Translation.txt", timestamped_text(segments))
-    ctx.store.upsert_text(ctx.folders["TRANSLATION"], "Translation.json", dump(data), JSON_MIME)
+    if segments:
+        ctx.store.upsert_text(folder, "English Translation.txt", timestamped_text(segments))
+    else:
+        ctx.store.upsert_text(folder, "English Translation.txt",
+                              "No separate English translation was produced for this meeting.\n")
+    ctx.store.upsert_text(folder, "Translation.json", dump(data), JSON_MIME)
     for key in ("source", "wav"):
         ctx.p[key].unlink(missing_ok=True)
 
