@@ -25,6 +25,16 @@ class DriveStore:
         # created in My Drive consume that user's quota and remain in the user's
         # meeting folders. This is the preferred online deployment mode.
         refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
+        if not refresh_token:
+            raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+            if raw:
+                try:
+                    candidate = json.loads(raw)
+                    refresh_token = str(candidate.get("refresh_token") or "").strip()
+                    client_id = client_id or str(candidate.get("client_id") or "").strip()
+                    client_secret = client_secret or str(candidate.get("client_secret") or "").strip()
+                except ValueError:
+                    pass
         if refresh_token:
             client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
             client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
