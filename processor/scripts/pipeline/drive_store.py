@@ -25,6 +25,8 @@ class DriveStore:
         # created in My Drive consume that user's quota and remain in the user's
         # meeting folders. This is the preferred online deployment mode.
         refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
+        client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
         if not refresh_token:
             raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
             if raw:
@@ -36,8 +38,6 @@ class DriveStore:
                 except ValueError:
                     pass
         if refresh_token:
-            client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
-            client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
             if not client_id:
                 raise MomError("MOM-002", "GOOGLE_OAUTH_CLIENT_ID is required when GOOGLE_OAUTH_REFRESH_TOKEN is configured.")
             from google.oauth2.credentials import Credentials
