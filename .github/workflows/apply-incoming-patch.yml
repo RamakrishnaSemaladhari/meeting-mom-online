@@ -27,6 +27,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git am --3way incoming/meeting-mom.patch
 
+      - name: Install test dependencies
+        run: pip install -r processor/requirements.txt
+
       - name: Validate patch
         run: |
           python -m py_compile processor/scripts/process_meeting.py processor/scripts/pipeline/speech_quality.py
