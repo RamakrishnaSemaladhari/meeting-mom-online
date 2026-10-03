@@ -37,6 +37,9 @@ jobs:
           pip install -r processor/requirements.txt
           python -m py_compile processor/scripts/process_meeting.py processor/scripts/pipeline/speech_quality.py
           python -m unittest discover -s processor/tests -p "test_*.py" -v
+          # GITHUB_TOKEN cannot push workflow-file changes. The connector will publish
+          # meeting-mom.yml separately after the non-workflow patch is deployed.
+          git restore --source=HEAD -- .github/workflows/meeting-mom.yml
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
           git add -A
           git commit --amend --no-edit
