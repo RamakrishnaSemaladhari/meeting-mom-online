@@ -37,9 +37,11 @@ jobs:
           pip install -r processor/requirements.txt
           python -m py_compile processor/scripts/process_meeting.py processor/scripts/pipeline/speech_quality.py
           python -m unittest discover -s processor/tests -p "test_*.py" -v
-          rm -f incoming/meeting-mom.patch .github/workflows/apply-incoming-patch.yml
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
           git add -A
           git commit --amend --no-edit
+          git fetch origin main
+          git rebase origin/main
           git push origin HEAD:main
 
   deploy:
@@ -49,8 +51,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout deployed main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
