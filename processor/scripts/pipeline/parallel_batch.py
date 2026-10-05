@@ -116,16 +116,44 @@ def whisper_json(wav, base, language):
         raise MomError("MOM-005", f"Whisper JSON is malformed: {exc}")
 
 
-def load_previous_context(store, meeting_folder, continuity_id=""):
+def load_previous_context(store, meeting_folder, metadata):
     try:
+        source_type = str((metadata or {}).get("continuity_source_type", "") or "").lower()
+        continuity_id = str((metadata or {}).get("continuity_meeting_id", "") or "").strip()
+
+        if source_type == "summary":
+            summary = str((metadata or {}).get("continuity_summary", "") or "").strip()
+            if not summary:
+                return None
+            return {
+                "meeting_name": metadata.get("continuity_meeting_title") or "Previous meeting summary",
+                "executive_summary": summary,
+                "complete_conversation_summary": summary,
+                "decisions": [],
+                "action_items": [],
+                "open_questions": [],
+                "source_type": "summary"
+            }
+
+        if source_type == "mom_file":
+            continuity_file = store.find_one(meeting_folder, "CONTINUITY_PREVIOUS_MOM.txt")
+            if not continuity_file:
+                return None
+            text = store.read_bytes(continuity_file["id"]).decode("utf-8", errors="replace").strip()
+            if not text:
+                return None
+            return {
+                "meeting_name": metadata.get("continuity_file_name") or "Previous MoM",
+                "previous_meeting_mom": text[:20000],
+                "executive_summary": text[:12000],
+                "complete_conversation_summary": text[:12000],
+                "decisions": [],
+                "action_items": [],
+                "open_questions": [],
+                "source_type": "mom_file"
+            }
+
         target_id = continuity_id
-        if not target_id:
-            meta = store.get_meta(meeting_folder)
-            parent = (meta.get("parents") or [None])[0]
-            if parent:
-                siblings = [x for x in store.list_children(parent, folders=True) if x["id"] != meeting_folder]
-                siblings.sort(key=lambda x: x.get("createdTime", ""), reverse=True)
-                target_id = siblings[0]["id"] if siblings else ""
         if not target_id:
             return None
 
@@ -145,9 +173,12 @@ def load_previous_context(store, meeting_folder, continuity_id=""):
         return {
             "meeting_name": previous_meta.get("title") or (store.get_meta(target_id).get("name") if store.get_meta(target_id) else "Previous meeting"),
             "executive_summary": data.get("executive_summary", data.get("summary", "")),
+            "complete_conversation_summary": data.get("complete_conversation_summary", ""),
             "decisions": data.get("decisions", []),
             "action_items": data.get("action_items", []),
-            "open_questions": data.get("open_questions", [])
+            "open_questions": data.get("open_questions", []),
+            "source_type": "meeting_id",
+            "source_meeting_id": target_id
         }
     except Exception as exc:
         log(f"Previous-meeting context ignored: {exc}")
@@ -363,11 +394,7 @@ def stage_finalize():
     if not metadata_file:
         raise MomError("MOM-002", "meeting_metadata.json was not found.")
     metadata = json.loads(store.read_bytes(metadata_file["id"]).decode("utf-8"))
-    previous = load_previous_context(
-        store,
-        meeting,
-        metadata.get("continuity_meeting_id", "")
-    )
+    previous = load_previous_context(store, meeting, metadata)
     attendance = load_attendance_manifest(store, meeting)
     if attendance:
         metadata["attendance_evidence"] = attendance
