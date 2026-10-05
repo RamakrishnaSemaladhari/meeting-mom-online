@@ -36,7 +36,7 @@
   }
 
   async function addSourceDocuments(item){
-    if(!item?.meetingFolderId||!window.accessToken)return;
+    if(!item?.meetingFolderId)return;
     try{
       const files=await listDriveFiles("'"+item.meetingFolderId+"' in parents and trashed = false","files(id,name,mimeType,webViewLink,modifiedTime)");
       const folders={};
@@ -78,7 +78,7 @@
   }
 
   async function pollBatchStatus(item){
-    if(!item?.id||!window.accessToken)return;
+    if(!item?.id)return;
     const loop=async()=>{
       const data=await readBatchStatus(item);
       if(data){
