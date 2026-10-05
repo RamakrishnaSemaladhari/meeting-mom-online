@@ -164,7 +164,7 @@ def _aggregate_batches(metadata, batch_results, text_fn, previous=None, model=""
     result = {k: result[k] for k in ai_mod.OUTPUT_KEYS}
     result["schema_version"] = ai_mod.SCHEMA_VERSION
     result["generated_with"] = {
-        "ai_model": model, "batches": len(batch_results), "batch_seconds": BATCH_SECONDS
+        "ai_model": final_model, "batch_ai_model": batch_model, "batch_ai_model": env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M"), "batches": len(batch_results), "batch_seconds": BATCH_SECONDS
     }
     result["previous_meeting_context"] = {
         "used_as_reference": bool(previous),
@@ -203,8 +203,9 @@ def stage_batch(ctx):
     if not files:
         raise MomError("MOM-004", "No 10-minute audio batches were created.")
 
-    model = env("AI_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
-    json_fn, text_fn = ai_mod.make_ollama_fns(model)
+    batch_model = env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M")
+    final_model = env("AI_FINAL_MODEL", env("AI_MODEL", "qwen3:4b-instruct-2507-q4_K_M"))
+    json_fn, text_fn = ai_mod.make_ollama_fns(batch_model)
     batch_results, all_original, all_translation = [], [], []
     previous = _read_previous_context(ctx)
 
@@ -229,25 +230,26 @@ def stage_batch(ctx):
         ctx.store.upsert_text(batch_folder, "Original Transcript.txt", timestamped_text(original))
         ctx.store.upsert_text(batch_folder, "Transcript.json", dump(data), JSON_MIME)
 
-        st.update("TRANSLATING", f"Batch {idx}/{len(files)} — English translation",
-                  52 + int(15 * (idx - 1) / len(files)),
+        st.update("ANALYZING", f"Batch {idx}/{len(files)} — AI evidence + translation",
+                  52 + int(20 * (idx - 1) / len(files)),
                   batch_index=idx, batch_total=len(files))
+        # Translation is produced in the same structured AI pass as evidence.
+        # This eliminates the second Whisper decode pass that previously doubled CPU time.
+        ai = ai_mod.run_understanding(
+            metadata, original, [], json_fn, text_fn,
+            max_chars=int(env("AI_CHUNK_CHARS", "12000")), model=batch_model
+        )
         lang = detected_language(data)
         if lang == "en":
             translation = [dict(s) for s in original]
-            tdata = {"transcription": [
-                {"offsets": {"from": int(s["start"]*1000), "to": int(s["end"]*1000)}, "text": s["text"]}
-                for s in original
-            ], "result": {"language": "en"},
-               "_quality": {"passed": True, "skipped": "source language is English"}}
         else:
-            tdata_local = whisper_json(
-                chunk_file, f"{chunks_dir}/translation_{idx:03d}",
-                translate=True, model=WHISPER_MODEL, language=lang or "auto"
-            )
-            translation = _shift_segments(ai_mod.segments_from_whisper(tdata_local), offset)
-            tdata = _shift_whisper_data(tdata_local, offset)
-            tdata["_batch"] = data["_batch"]
+            translation = _translation_from_ai(ai.get("translation_segments", []), original, offset)
+            if not translation:
+                ai["review_flags"].append("AI translation was not aligned; review the original transcript.")
+        tdata = {"transcription": [
+            {"offsets": {"from": int(s["start"]*1000), "to": int(s["end"]*1000)}, "text": s["text"]}
+            for s in translation
+        ], "result": {"language": "en"}, "_quality": {"engine": "AI", "source_language": lang or "auto"}}
         all_translation.extend(translation)
         ctx.store.upsert_text(
             batch_folder, "English Translation.txt",
@@ -259,13 +261,7 @@ def stage_batch(ctx):
             _combined_bilingual(original, translation)
         )
 
-        st.update("ANALYZING", f"Batch {idx}/{len(files)} — AI evidence extraction",
-                  68 + int(12 * (idx - 1) / len(files)),
-                  batch_index=idx, batch_total=len(files))
-        ai = ai_mod.run_understanding(
-            metadata, original, translation, json_fn, text_fn,
-            max_chars=int(env("AI_CHUNK_CHARS", "8000")), model=model
-        )
+        ai["generated_with"]["batch_ai_model"] = batch_model
         ai["batch"] = {"index": idx, "start": fmt_ts(offset), "end": fmt_ts(end_time)}
         ctx.store.upsert_text(batch_folder, "AI Evidence.json", dump(ai), JSON_MIME)
         ctx.store.upsert_text(batch_folder, "Complete Conversation Summary.txt",
@@ -276,7 +272,8 @@ def stage_batch(ctx):
 
     st.update("SUMMARIZING", "Combining all batches into one complete meeting understanding",
               84, batch_index=len(files), batch_total=len(files))
-    final_ai = _aggregate_batches(metadata, batch_results, text_fn, previous=previous, model=model)
+    final_json_fn, final_text_fn = ai_mod.make_ollama_fns(final_model)
+    final_ai = _aggregate_batches(metadata, batch_results, final_text_fn, previous=previous, model=final_model)
     final_ai["batch_manifest"] = {
         "total": len(files), "batch_seconds": BATCH_SECONDS, "duration_seconds": duration
     }
