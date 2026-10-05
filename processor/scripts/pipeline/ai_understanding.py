@@ -19,7 +19,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
 SCHEMA_VERSION = "1.0"
 
 CHUNK_KEYS = ["section_summary", "discussion_points", "decisions", "action_items",
-              "commitments", "open_questions", "next_meeting", "review_flags"]
+              "commitments", "open_questions", "next_meeting", "review_flags", "translation"]
 OUTPUT_KEYS = ["executive_summary", "complete_conversation_summary", "discussion_points",
                "decisions", "action_items", "commitments", "open_questions",
                "next_meeting", "review_flags"]
