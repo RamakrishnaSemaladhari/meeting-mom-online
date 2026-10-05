@@ -526,6 +526,13 @@ function initGoogle() {
       $("meetingCard").classList.remove("hidden");
       $("date").value = $("date").value || todayISO();
       renderBackgroundProcessing();
+      backgroundProcessing
+        .filter(item => item && item.stage !== "complete" && item.stage !== "failed")
+        .forEach(item => {
+          monitorDriveProcessingStatus(item);
+          if (item.runId) monitorWorkflowRun(item);
+          else findAndMonitorLatestRun(item, item.created_at || new Date().toISOString());
+        });
       let restored = false;
       try {
         restored = restoreMeetingState();
@@ -1124,7 +1131,8 @@ async function createInitialProcessingStatus(snapshot) {
     progress_percent: 5,
     message: "Processing request sent. Waiting for GitHub Actions to begin.",
     status: "PROCESSING",
-    updated_at: new Date().toISOString()
+    updated_at: new Date().toISOString(),
+    github_run_id: null
   }, null, 2);
 
   if (existing[0]) {
@@ -1146,6 +1154,24 @@ async function createInitialProcessingStatus(snapshot) {
   return file.id;
 }
 
+async function persistProcessingRunId(item, runId) {
+  if (!item?.meetingFolderId || !runId || !accessToken) return;
+  try {
+    const files = await listDriveFiles(
+      "'" + item.meetingFolderId + "' in parents and name = 'PROCESSING_STATUS.json' and trashed = false",
+      "files(id,name)"
+    );
+    if (!files.length) return;
+    const response = await driveRequest(
+      "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(files[0].id) + "?alt=media"
+    );
+    const data = await response.json();
+    data.github_run_id = String(runId);
+    data.updated_at = new Date().toISOString();
+    await uploadTextToFile(files[0].id, JSON.stringify(data, null, 2), "application/json");
+  } catch (_) {}
+}
+
 async function readProcessingStatus(item) {
   if (!item || !item.meetingFolderId) return null;
   try {
@@ -1157,7 +1183,8 @@ async function readProcessingStatus(item) {
     const response = await driveRequest(
       "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(files[0].id) + "?alt=media"
     );
-    return await response.json();
+    const data = await response.json();
+    return data;
   } catch (_) {
     return null;
   }
@@ -1225,6 +1252,11 @@ async function monitorDriveProcessingStatus(item) {
     const pct = Number(data.progress_percent || 5);
     const rawStage = String(data.stage || "QUEUED").toUpperCase();
     const stage = rawStage === "COMPLETED" ? "complete" : rawStage === "FAILED" ? "failed" : rawStage.toLowerCase();
+    if (data.github_run_id && !item.runId) {
+      item.runId = String(data.github_run_id);
+      saveBackgroundProcessingQueue();
+      monitorWorkflowRun(Object.assign({}, item, {runId: item.runId}));
+    }
     updateBackgroundProcessing(item.id, {
       stage: stage,
       percent: pct,
@@ -1393,6 +1425,7 @@ async function findAndMonitorLatestRun(item,requestStarted) {
     const run=(data.workflow_runs||[]).find(function(x){return Date.parse(x.created_at)>=since;});
     if (!run) { updateBackgroundProcessing(item.id,{statusText:"Processing request sent — waiting for GitHub Actions"}); setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000); return; }
     updateBackgroundProcessing(item.id,{runId:run.id,statusText:run.status==="completed" ? (run.conclusion==="success" ? "Processing complete" : "Processing failed") : "Processing started",percent:run.status==="completed"&&run.conclusion==="success"?100:8});
+    await persistProcessingRunId(item, run.id);
     monitorWorkflowRun(Object.assign({},item,{runId:run.id}));
   } catch(e) { setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},15000); }
 }
