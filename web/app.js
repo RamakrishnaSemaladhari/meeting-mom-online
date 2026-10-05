@@ -417,6 +417,7 @@ function persistMeetingState() {
     translation: meetingFolders.translation,
     ai: meetingFolders.ai,
     mom: meetingFolders.mom,
+    referenceDocuments: meetingFolders.referenceDocuments || null,
     metadata: meetingFolders.metadata,
     audioUploaded: !!audioUploaded,
     audioFile: meetingFolders.audioFile || null,
@@ -776,7 +777,7 @@ async function recoverLatestMeeting() {
     if (!audioFiles.length) continue;
 
     const subfolders = {};
-    for (const name of ["TRANSCRIPT","TRANSLATION","AI","MOM"]) {
+    for (const name of ["TRANSCRIPT","TRANSLATION","AI","MOM","REFERENCE_DOCUMENTS"]) {
       subfolders[name] = children.find(x =>
         x.name === name &&
         x.mimeType === "application/vnd.google-apps.folder"
@@ -801,6 +802,7 @@ async function recoverLatestMeeting() {
       translation: subfolders.TRANSLATION,
       ai: subfolders.AI,
       mom: subfolders.MOM,
+      referenceDocuments: subfolders.REFERENCE_DOCUMENTS,
       metadata
     };
     audioUploaded = true;
