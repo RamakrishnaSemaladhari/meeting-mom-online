@@ -330,11 +330,11 @@ def stage_ai(ctx):
     translation_data = load_json_local_or_drive(
         ctx, ctx.p["translation_json"], "TRANSLATION", "Translation.json", required=False)
     translation = ai_mod.segments_from_whisper(translation_data) if translation_data else []
-    model = env("AI_MODEL", "qwen2.5:1.5b-instruct-q3_K_L")
+    model = env("AI_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
     json_fn, text_fn = ai_mod.make_ollama_fns(model)
     ai = ai_mod.run_understanding(
         metadata, original, translation, json_fn, text_fn,
-        max_chars=int(env("AI_CHUNK_CHARS", "6000")),
+        max_chars=int(env("AI_CHUNK_CHARS", "8000")),
         progress=lambda state, msg, pct: st.update(state, msg, pct), model=model)
     ctx.p["ai"].write_text(dump(ai), encoding="utf-8")
     st.update("SUMMARIZING", "Saving AI outputs", 85)
