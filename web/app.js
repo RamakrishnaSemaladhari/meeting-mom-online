@@ -524,6 +524,7 @@ function initGoogle() {
       try {
         restored = restoreMeetingState();
         await ensureAppDriveRoot();
+        await populateContinuityMeetings();
         if (restored) {
           const existingJob = meetingFolders?.meeting?.id
             ? backgroundProcessing.find(x => x.id === meetingFolders.meeting.id)
@@ -680,6 +681,8 @@ async function recoverLatestMeeting() {
     if (metadataData.end_time) $("endTime").value = metadataData.end_time;
     if (metadataData.venue) $("venue").value = metadataData.venue;
     if (metadataData.agenda) $("agenda").value = metadataData.agenda;
+    if (metadataData.initiator) $("initiator").value = metadataData.initiator;
+    if (metadataData.continuity_meeting_id) $("continuityMeeting").value = metadataData.continuity_meeting_id;
     if (Array.isArray(metadataData.participants)) {
       $("participants").innerHTML = "";
       metadataData.participants.forEach(p => addParticipant(p));
@@ -757,6 +760,9 @@ async function createMeetingWorkspace() {
     end_time: $("endTime").value,
     venue: $("venue").value.trim(),
     agenda: $("agenda").value.trim(),
+    initiator: $("initiator")?.value.trim() || "",
+    continuity_meeting_id: $("continuityMeeting")?.value || "",
+    continuity_meeting_title: getSelectedContinuityTitle(),
     participants: collectParticipants(),
     created_at: new Date().toISOString()
   };
@@ -801,6 +807,9 @@ async function updateMeetingMetadata() {
     end_time: $("endTime").value,
     venue: $("venue").value.trim(),
     agenda: $("agenda").value.trim(),
+    initiator: $("initiator")?.value.trim() || "",
+    continuity_meeting_id: $("continuityMeeting")?.value || "",
+    continuity_meeting_title: getSelectedContinuityTitle(),
     participants: collectParticipants(),
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
@@ -897,11 +906,14 @@ function addParticipant(values={}) {
   const box = document.createElement("div");
   box.className = "participant";
   box.innerHTML =
-    '<input class="pname" placeholder="Name" value="'+escapeHtml(values.name||"")+'">' +
-    '<input class="pdesignation" placeholder="Designation" value="'+escapeHtml(values.designation||"")+'">' +
-    '<input class="porg" placeholder="Organisation (optional)" value="'+escapeHtml(values.organisation||"")+'">' +
-    '<button type="button" class="secondary mini removeParticipant">Remove</button>';
+    '<div class="voice-wrap"><input class="pname" placeholder="Name" value="'+escapeHtml(values.name||"")+'"><button type="button" class="secondary voice-btn participantVoice" data-target="pname">🎤</button></div>' +
+    '<div class="voice-wrap" style="margin-top:8px"><input class="pdesignation" placeholder="Designation" value="'+escapeHtml(values.designation||"")+'"><button type="button" class="secondary voice-btn participantVoice" data-target="pdesignation">🎤</button></div>' +
+    '<div class="voice-wrap" style="margin-top:8px"><input class="porg" placeholder="Organisation (optional)" value="'+escapeHtml(values.organisation||"")+'"><button type="button" class="secondary voice-btn participantVoice" data-target="porg">🎤</button></div>' +
+    '<button type="button" class="secondary mini removeParticipant" style="margin-top:8px">Remove</button>';
   box.querySelector(".removeParticipant").addEventListener("click",()=>box.remove());
+  box.querySelectorAll(".participantVoice").forEach(btn => {
+    btn.addEventListener("click",()=>startFieldVoice(btn, box.querySelector("." + btn.dataset.target)));
+  });
   $("participants").appendChild(box);
 }
 
@@ -955,6 +967,8 @@ async function startMeeting() {
     $("startTime").value = new Date().toTimeString().slice(0,5);
     $("startBtn").classList.add("hidden");
     $("stopBtn").classList.remove("hidden");
+    $("recordingDot")?.classList.remove("hidden");
+    $("recordingState") && ($("recordingState").textContent = "Recording live — speak normally");
     $("timer").textContent = "00:00:00";
     timerHandle = setInterval(() => {
       $("timer").textContent = formatTime(Date.now() - startedAt);
@@ -1560,6 +1574,87 @@ function initSpeechButton(buttonId,inputId) {
   rec.onresult=function(e){input.value=e.results[0][0].transcript;input.dispatchEvent(new Event("input"));};
 }
 
+function parseVoiceDate(text) {
+  const raw=String(text||"").trim().toLowerCase();
+  const d=new Date(raw);
+  if(!isNaN(d.getTime())) return d.toISOString().slice(0,10);
+  const m=raw.match(/(\d{1,2})[\s\/-]+(\d{1,2})[\s\/-]+(\d{2,4})/);
+  if(m){let y=Number(m[3]);if(y<100)y+=2000;const dt=new Date(y,Number(m[2])-1,Number(m[1]));if(!isNaN(dt.getTime()))return dt.toISOString().slice(0,10);}
+  return text;
+}
+function parseVoiceTime(text) {
+  const raw=String(text||"").toLowerCase().replace(/\./g,"");
+  const m=raw.match(/(\d{1,2})(?::|\s+)?(\d{2})?\s*(am|pm)?/);
+  if(!m) return text;
+  let h=Number(m[1]), min=Number(m[2]||0); const ap=m[3];
+  if(ap==="pm"&&h<12)h+=12;if(ap==="am"&&h===12)h=0;
+  if(h>23||min>59)return text;
+  return String(h).padStart(2,"0")+":"+String(min).padStart(2,"0");
+}
+function startFieldVoice(button,input,parser) {
+  if(!button||!input)return;
+  const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SpeechRecognition){button.disabled=true;return;}
+  if(button._recognition){try{button._recognition.abort();}catch(_){}}
+  const rec=new SpeechRecognition(); button._recognition=rec;
+  rec.lang="en-IN";rec.interimResults=false;rec.continuous=false;
+  rec.onstart=()=>{button.classList.add("listening");button.textContent="■";status("Listening for "+(input.getAttribute("placeholder")||input.id)+"...","");};
+  rec.onend=()=>{button.classList.remove("listening");button.textContent="🎤";};
+  rec.onerror=e=>status("Voice input unavailable: "+(e.error||"unknown error"),"error");
+  rec.onresult=e=>{const t=e.results?.[0]?.[0]?.transcript||"";input.value=parser?parser(t):t;input.dispatchEvent(new Event("input",{bubbles:true}));};
+  button.onclick=()=>{try{rec.start();}catch(_){}};
+}
+function getSelectedContinuityTitle() {
+  const select=$("continuityMeeting"); if(!select?.value)return "";
+  return select.options[select.selectedIndex]?.textContent.replace(/^.*?—\s*/,"").trim()||"";
+}
+async function populateContinuityMeetings() {
+  const select=$("continuityMeeting"); if(!select||!accessToken)return;
+  try {
+    const folders=await listDriveFiles("'"+DRIVE_INBOX_ID+"' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false","files(id,name,createdTime)");
+    const rows=[];
+    for(const folder of folders.slice(0,20)){
+      let title=folder.name;
+      try {
+        const files=await listDriveFiles("'"+folder.id+"' in parents and name = 'meeting_metadata.json' and trashed = false","files(id,name)");
+        if(files.length){
+          const r=await driveRequest("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(files[0].id)+"?alt=media");
+          const m=await r.json(); if(m.title)title=m.title;
+        }
+      }catch(_){}
+      rows.push({id:folder.id,title,createdTime:folder.createdTime});
+    }
+    rows.sort((a,b)=>String(b.createdTime).localeCompare(String(a.createdTime)));
+    select.innerHTML='<option value="">No previous meeting — start fresh</option>'+rows.map(x=>'<option value="'+escapeHtml(x.id)+'">'+escapeHtml(new Date(x.createdTime).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"}))+' — '+escapeHtml(x.title)+'</option>').join("");
+  }catch(e){console.warn("Continuity list failed",e);}
+}
+async function loadContinuityMeeting() {
+  const id=$("continuityMeeting")?.value;
+  if(!id){$("continuityStatus").textContent="Continuity cleared. This meeting will be treated as a new meeting.";return;}
+  try {
+    const item={meetingFolderId:id,title:$("continuityMeeting").options[$("continuityMeeting").selectedIndex].textContent};
+    const snapshot=await loadBackgroundMeetingSnapshot(item);
+    const files=await listDriveFiles("'"+id+"' in parents and name = 'meeting_metadata.json' and trashed = false","files(id,name)");
+    if(files.length){
+      const r=await driveRequest("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(files[0].id)+"?alt=media");
+      const m=await r.json();
+      if(m.title)$("title").value=m.title+" — Continuation";
+      if(m.venue)$("venue").value=m.venue;
+      if(m.agenda)$("agenda").value=m.agenda;
+      if(m.initiator)$("initiator").value=m.initiator;
+      if(Array.isArray(m.participants)){$("participants").innerHTML="";m.participants.forEach(p=>addParticipant(p));}
+      updateFilenamePreview();
+    }
+    $("continuityStatus").textContent="Previous meeting context loaded. Your new recording/upload remains separate.";
+    status("Previous meeting context loaded. New meeting audio will be stored separately.","success");
+  }catch(e){$("continuityStatus").textContent=e.message;status(e.message,"error");}
+}
+function clearContinuityMeeting() {
+  $("continuityMeeting").value="";
+  $("continuityStatus").textContent="Continuity cleared.";
+}
+
+
 document.addEventListener("DOMContentLoaded",function(){
   $("connectBtn")?.addEventListener("click",connectGoogle);
   $("addParticipant")?.addEventListener("click",function(){addParticipant();});
@@ -1573,5 +1668,12 @@ document.addEventListener("DOMContentLoaded",function(){
   [["listenSummaryBtn","editSummary"],["listenDecisionsBtn","editDecisions"],["listenActionsBtn","editActions"],["listenFollowupBtn","editFollowup"],["listenMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){listenField(x[1]);});});
   $("saveFinalBtn")?.addEventListener("click",saveFinalMom);
   initSpeechButton("titleVoice","title"); initSpeechButton("agendaVoice","agenda");
+  startFieldVoice($("initiatorVoice"),$("initiator"));
+  startFieldVoice($("dateVoice"),$("date"),parseVoiceDate);
+  startFieldVoice($("startTimeVoice"),$("startTime"),parseVoiceTime);
+  startFieldVoice($("endTimeVoice"),$("endTime"),parseVoiceTime);
+  startFieldVoice($("venueVoice"),$("venue"));
+  $("loadContinuityBtn")?.addEventListener("click",loadContinuityMeeting);
+  $("clearContinuityBtn")?.addEventListener("click",clearContinuityMeeting);
   updateFilenamePreview(); renderBackgroundProcessing(); initGoogle();
 });
