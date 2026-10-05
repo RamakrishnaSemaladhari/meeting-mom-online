@@ -121,6 +121,9 @@ jobs:
       - name: Test Google Drive access
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
         run: python processor/scripts/test_drive_connection.py
 
   process-meeting:
@@ -156,12 +159,19 @@ jobs:
       - name: Check Google Drive processor credential
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
         run: |
-          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
-            echo "ERROR: GOOGLE_SERVICE_ACCOUNT_JSON GitHub secret is not configured."
+          if [ -n "$GOOGLE_OAUTH_REFRESH_TOKEN" ] && [ -n "$GOOGLE_OAUTH_CLIENT_ID" ]; then
+            echo "Google Drive credential: OAuth refresh-token mode (preferred for My Drive)."
+          elif [ -n "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "Google Drive credential: service-account fallback."
+          else
+            echo "ERROR: No Google Drive credential is configured."
+            echo "Configure GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET + GOOGLE_OAUTH_REFRESH_TOKEN."
             exit 1
           fi
-          echo "Google Drive processor credential is available."
 
       # ubuntu-latest already contains the common build/runtime tools we need.
       # Only install them as a fallback if a future runner image removes one.
@@ -240,6 +250,9 @@ jobs:
       - name: Write QUEUED status
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
@@ -248,6 +261,9 @@ jobs:
       - name: Diagnose Google Drive meeting access
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
         run: python processor/scripts/test_drive_connection.py
@@ -255,6 +271,9 @@ jobs:
       - name: Whisper transcription
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
@@ -265,6 +284,9 @@ jobs:
       - name: English translation
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
@@ -275,6 +297,9 @@ jobs:
           AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
           OLLAMA_MODELS: /home/runner/.ollama/models
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
@@ -285,6 +310,9 @@ jobs:
           AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
           OLLAMA_MODELS: /home/runner/.ollama/models
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
@@ -294,6 +322,9 @@ jobs:
         if: failure()
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
