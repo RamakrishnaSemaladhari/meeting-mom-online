@@ -104,32 +104,74 @@ def _shift_whisper_data(data, offset):
 
 def _read_previous_context(ctx):
     try:
-        meta = ctx.store.get_meta(ctx.meeting_folder)
-        parent = (meta.get("parents") or [None])[0]
-        if not parent:
-            return None
-        siblings = [x for x in ctx.store.list_children(parent, folders=True)
-                    if x["id"] != ctx.meeting_folder]
-        siblings.sort(key=lambda x: x.get("createdTime", ""), reverse=True)
-        for sibling in siblings[:10]:
-            children = ctx.store.list_children(sibling["id"], folders=True)
-            ai_folder = next((x for x in children if x["name"] == "AI"), None)
-            if not ai_folder:
-                continue
-            evidence = ctx.store.find_one(ai_folder["id"], "AI Evidence.json")
-            if not evidence:
-                continue
-            data = json.loads(ctx.store.read_bytes(evidence["id"]).decode("utf-8"))
+        metadata = json.loads(
+            ctx.store.read_bytes(ctx.store.find_one(ctx.meeting_folder, "meeting_metadata.json")["id"]).decode("utf-8")
+        )
+        source_type = str(metadata.get("continuity_source_type", "") or "").lower()
+
+        if source_type == "summary":
+            summary = str(metadata.get("continuity_summary", "") or "").strip()
+            if not summary:
+                return None
             return {
-                "meeting_name": sibling.get("name", "Previous meeting"),
-                "executive_summary": data.get("executive_summary", data.get("summary", "")),
-                "decisions": data.get("decisions", []),
-                "action_items": data.get("action_items", []),
-                "open_questions": data.get("open_questions", [])
+                "meeting_name": metadata.get("continuity_meeting_title") or "Previous meeting summary",
+                "executive_summary": summary,
+                "complete_conversation_summary": summary,
+                "decisions": [],
+                "action_items": [],
+                "open_questions": [],
+                "source_type": "summary"
             }
+
+        if source_type == "mom_file":
+            continuity_file = ctx.store.find_one(ctx.meeting_folder, "CONTINUITY_PREVIOUS_MOM.txt")
+            if not continuity_file:
+                return None
+            text = ctx.store.read_bytes(continuity_file["id"]).decode("utf-8", errors="replace").strip()
+            if not text:
+                return None
+            return {
+                "meeting_name": metadata.get("continuity_file_name") or "Previous MoM",
+                "previous_meeting_mom": text[:20000],
+                "executive_summary": text[:12000],
+                "complete_conversation_summary": text[:12000],
+                "decisions": [],
+                "action_items": [],
+                "open_questions": [],
+                "source_type": "mom_file"
+            }
+
+        continuity_id = str(metadata.get("continuity_meeting_id", "") or "").strip()
+        if not continuity_id:
+            return None
+
+        children = ctx.store.list_children(continuity_id, folders=True)
+        ai_folder = next((x for x in children if x["name"] == "AI"), None)
+        evidence = ctx.store.find_one(ai_folder["id"], "AI Evidence.json") if ai_folder else None
+        if not evidence:
+            return None
+        data = json.loads(ctx.store.read_bytes(evidence["id"]).decode("utf-8"))
+        meta_file = ctx.store.find_one(continuity_id, "meeting_metadata.json")
+        previous_meta = {}
+        if meta_file:
+            try:
+                previous_meta = json.loads(ctx.store.read_bytes(meta_file["id"]).decode("utf-8"))
+            except Exception:
+                previous_meta = {}
+        return {
+            "meeting_name": previous_meta.get("title") or "Previous meeting",
+            "executive_summary": data.get("executive_summary", data.get("summary", "")),
+            "complete_conversation_summary": data.get("complete_conversation_summary", ""),
+            "decisions": data.get("decisions", []),
+            "action_items": data.get("action_items", []),
+            "open_questions": data.get("open_questions", []),
+            "source_type": "meeting_id",
+            "source_meeting_id": continuity_id
+        }
     except Exception as exc:
         log(f"Previous-meeting context ignored: {exc}")
     return None
+
 
 def _aggregate_batches(metadata, batch_results, text_fn, previous=None, model=""):
     sections = []
