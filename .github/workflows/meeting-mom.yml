@@ -90,6 +90,12 @@ jobs:
           cache: pip
           cache-dependency-path: processor/requirements.txt
       - run: pip install -r processor/requirements.txt
+      - name: Validate meeting dispatch payload
+        run: |
+          test -n "$MEETING_ID" || { echo "::error::MEETING_ID is missing from repository_dispatch payload."; exit 1; }
+          test -n "$MEETING_FOLDER_ID" || { echo "::error::MEETING_FOLDER_ID is missing from repository_dispatch payload."; exit 1; }
+          test -n "$AUDIO_FOLDER_ID" || { echo "::error::AUDIO_FOLDER_ID is missing from repository_dispatch payload."; exit 1; }
+          test -n "$AUDIO_FILE_ID" || { echo "::error::AUDIO_FILE_ID is missing from repository_dispatch payload."; exit 1; }
       - name: Initialize processing status
         run: python processor/scripts/process_meeting.py --stage init
       - name: Discover duration and dynamic matrix
@@ -146,7 +152,7 @@ jobs:
         run: rm -rf .meeting_work_parallel
 
   finalize:
-    if: always() && github.event_name == 'repository_dispatch'
+    if: ${{ github.event_name == 'repository_dispatch' && needs.prepare.result == 'success' && needs.parallel-batches.result == 'success' }}
     needs: [prepare, parallel-batches]
     runs-on: ubuntu-latest
     timeout-minutes: 120
