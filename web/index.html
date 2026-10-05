@@ -69,6 +69,7 @@
 .continuity-panel input[type=file]{font-size:13px}
 .continuity-summary{min-height:120px!important}
 .source-badge{display:inline-block;margin-top:8px;padding:4px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:11px;font-weight:700}
+.type-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.type-card{margin-top:14px;padding:14px;border:1px solid #dbe3ee;border-radius:16px;background:#f8fafc}.type-card h3{margin:0 0 4px;font-size:16px}.type-card .hint{margin-bottom:4px}.type-card select{width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;background:#fff}.type-conditional{display:none;margin-top:10px}.type-conditional.visible{display:block}
 
   </style>
 </head>
@@ -92,6 +93,61 @@
 
     <label for="initiator">Meeting initiator</label>
     <div class="voice-wrap"><input id="initiator" placeholder="Who initiated the meeting?"><button id="initiatorVoice" class="secondary voice-btn" type="button">🎤</button></div>
+
+    <div class="type-card">
+      <h3>Session / Meeting Type</h3>
+      <div class="hint">Choose the purpose first. This becomes part of the evidence package and tells the processor how to structure the final output.</div>
+      <div class="type-grid">
+        <div class="field">
+          <label for="meetingType">Type</label>
+          <select id="meetingType">
+            <option value="meeting_mom">Meeting / MoM</option>
+            <option value="notes">Notes Taking</option>
+            <option value="lecture_learning">Lecture / Learning</option>
+            <option value="business_management">Business / Management</option>
+            <option value="hr_interview">HR / Interview / Professional Discussion</option>
+            <option value="legal_client_case">Legal Client / Case Discussion</option>
+            <option value="legal_stage_1_analysis">Legal Stage 1 — Case Analysis</option>
+            <option value="legal_stage_2_verification">Legal Stage 2 — Document Verification</option>
+            <option value="legal_stage_3_drafting">Legal Stage 3 — Legal Drafting</option>
+            <option value="continuity_comparison">Business / Office Continuity & Document Comparison</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="meetingSubtype">Subtype</label>
+          <select id="meetingSubtype">
+            <option value="daily_meeting">Daily Meeting</option>
+            <option value="weekly_meeting">Weekly Meeting</option>
+            <option value="monthly_meeting">Monthly Meeting</option>
+            <option value="review_meeting">Review Meeting</option>
+            <option value="planning_meeting">Planning Meeting</option>
+            <option value="project_meeting">Project Meeting</option>
+            <option value="general">General</option>
+          </select>
+        </div>
+      </div>
+      <div class="type-conditional" id="lectureFields">
+        <label for="learningContext">Learning / Lecture Context</label>
+        <input id="learningContext" placeholder="Subject, course, class, training or lecture context">
+      </div>
+      <div class="type-conditional" id="legalFields">
+        <label for="caseReference">Case / Matter Reference</label>
+        <input id="caseReference" placeholder="Case number / client / matter reference (if applicable)">
+        <label for="legalObjective">Legal Objective / Issue</label>
+        <textarea id="legalObjective" placeholder="Facts, issue, relief, verification requirement or drafting objective"></textarea>
+      </div>
+      <div class="type-conditional" id="verificationFields">
+        <label for="verificationDocuments">Documents for Verification</label>
+        <input id="verificationDocuments" type="file" multiple accept=".pdf,.doc,.docx,.txt,.md,.jpg,.jpeg,.png">
+        <div class="hint">Stage 2 documents are supporting evidence; the original transcript remains separate.</div>
+      </div>
+      <div class="type-conditional" id="draftingFields">
+        <label for="draftingInstruction">Drafting Instruction</label>
+        <textarea id="draftingInstruction" placeholder="What document or legal draft is required?"></textarea>
+      </div>
+      <label for="sessionNotes">Pre-session Notes / Additional Context</label>
+      <textarea id="sessionNotes" placeholder="Optional notes or context to accompany the recording"></textarea>
+    </div>
 
     <div class="grid">
       <div class="field"><label for="date">Meeting date</label><div class="voice-wrap"><input id="date" type="date"><button id="dateVoice" class="secondary voice-btn" type="button">🎤</button></div></div>
