@@ -234,6 +234,7 @@ function prepareNextMeeting() {
   localStorage.removeItem("meeting_mom_active_meeting");
 
   $("title").value = "";
+  $("initiator").value = "";
   $("date").value = todayISO();
   $("startTime").value = "";
   $("endTime").value = "";
@@ -241,6 +242,11 @@ function prepareNextMeeting() {
   $("agenda").value = "";
   $("participants").innerHTML = "";
   $("audioFile").value = "";
+  if ($("continuityMeeting")) $("continuityMeeting").value = "";
+  if ($("continuityStatus")) $("continuityStatus").textContent = "";
+  if ($("attendanceCount")) $("attendanceCount").value = "0";
+  if ($("attendanceStatus")) $("attendanceStatus").textContent = "Waiting for Meeting Mesh BLE attendance.";
+  if ($("attendanceList")) $("attendanceList").innerHTML = "";
   $("timer").textContent = "00:00:00";
   $("processingCard")?.classList.add("hidden");
   $("uploadBox")?.classList.add("hidden");
@@ -1844,8 +1850,6 @@ async function loadContinuityMeeting() {
   const id=$("continuityMeeting")?.value;
   if(!id){$("continuityStatus").textContent="Continuity cleared. This meeting will be treated as a new meeting.";return;}
   try {
-    const item={meetingFolderId:id,title:$("continuityMeeting").options[$("continuityMeeting").selectedIndex].textContent};
-    const snapshot=await loadBackgroundMeetingSnapshot(item);
     const files=await listDriveFiles("'"+id+"' in parents and name = 'meeting_metadata.json' and trashed = false","files(id,name)");
     if(files.length){
       const r=await driveRequest("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(files[0].id)+"?alt=media");
