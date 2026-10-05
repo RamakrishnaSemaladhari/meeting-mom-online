@@ -168,12 +168,33 @@ jobs:
           if ! ollama list | awk 'NR>1 {print $1}' | grep -Fxq "$AI_FINAL_MODEL"; then ollama pull "$AI_FINAL_MODEL"; fi
       - name: Final synthesis and MoM
         run: python processor/scripts/pipeline/parallel_batch.py --mode finalize
-      - name: Mark processing failed if finalization failed
-        if: failure()
-        env:
-          FAILED_ERROR_CODE: MOM-019
-          FAILED_STEP: parallel-finalize
-        run: python processor/scripts/process_meeting.py --stage fail
       - name: Cleanup
         if: always()
         run: rm -rf .meeting_work_parallel .meeting_work
+  record-failure:
+    if: ${{ always() && github.event_name == 'repository_dispatch' && (needs.prepare.result != 'success' || needs.parallel-batches.result != 'success' || needs.finalize.result != 'success') }}
+    needs: [prepare, parallel-batches, finalize]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+      GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+      MEETING_ID: ${{ github.event.client_payload.meeting_id }}
+      AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
+      MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
+      AUDIO_FILE_ID: ${{ github.event.client_payload.audio_file_id }}
+      FAILED_ERROR_CODE: MOM-019
+      FAILED_STEP: ${{ needs.prepare.result != 'success' && 'prepare' || needs.parallel-batches.result != 'success' && 'parallel-batches' || 'finalize' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: processor/requirements.txt
+      - run: pip install -r processor/requirements.txt
+      - name: Record machine-readable failure status
+        run: python processor/scripts/process_meeting.py --stage fail
+
