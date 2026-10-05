@@ -1,6 +1,5 @@
-import json
 import os
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 ROOT_FOLDER_ID = "1kfwyuKxXdywPy9jhZjghFI4yGJEwh-Yl"
@@ -8,12 +7,24 @@ MEETING_FOLDER_ID = os.environ.get("MEETING_FOLDER_ID", "")
 AUDIO_FOLDER_ID = os.environ.get("AUDIO_FOLDER_ID", "")
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-if not raw:
-    raise SystemExit("GOOGLE_SERVICE_ACCOUNT_JSON is missing.")
+refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
+client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 
-info = json.loads(raw)
-creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+if not refresh_token or not client_id or not client_secret:
+    raise SystemExit(
+        "Google Drive OAuth is not fully configured. "
+        "Set GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REFRESH_TOKEN."
+    )
+
+creds = Credentials(
+    token=None,
+    refresh_token=refresh_token,
+    token_uri="https://oauth2.googleapis.com/token",
+    client_id=client_id,
+    client_secret=client_secret,
+    scopes=SCOPES,
+)
 service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
 folder = service.files().get(
@@ -22,7 +33,7 @@ folder = service.files().get(
 ).execute()
 
 print("DRIVE CONNECTION: PASS")
-print("Service account:", info.get("client_email"))
+print("Authentication: Google OAuth 2.0")
 print("Accessible folder:", folder.get("name"))
 print("Folder ID:", folder.get("id"))
 print("Mime type:", folder.get("mimeType"))
