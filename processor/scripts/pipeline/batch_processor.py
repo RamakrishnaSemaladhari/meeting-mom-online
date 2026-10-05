@@ -9,7 +9,7 @@ from . import ai_understanding as ai_mod
 from .docx_builder import build_mom_doc
 from .validation import validate
 
-BATCH_SECONDS = int(env("BATCH_SECONDS", "600"))
+BATCH_SECONDS = 600
 
 def _ffprobe_duration(path):
     try:
