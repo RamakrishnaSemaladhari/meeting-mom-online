@@ -91,6 +91,23 @@
     <div class="voice-wrap"><textarea id="agenda" placeholder="Meeting agenda"></textarea><button id="agendaVoice" class="secondary voice-btn" type="button">🎤</button></div>
 
     <div class="continuity-card">
+      <div class="continuity-title">BLE Attendance Intake</div>
+      <div class="hint">Attendance can arrive from the Meeting Mesh BLE host/participant app. The web UI reads the private attendance manifest from this meeting's Google Drive workspace. No public broadcast is used.</div>
+      <div class="grid" style="margin-top:10px">
+        <div class="field"><label for="attendanceMode">Mode</label><select id="attendanceMode" style="width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px"><option value="HOST">Host</option><option value="PARTICIPANT">Participant</option></select></div>
+        <div class="field"><label for="attendanceCount">Present</label><input id="attendanceCount" value="0" readonly></div>
+      </div>
+      <div id="attendanceStatus" class="status small">BLE attendance not connected.</div>
+      <div id="attendanceList"></div>
+      <div class="continuity-actions">
+        <button id="refreshAttendanceBtn" class="secondary" type="button">REFRESH BLE ATTENDANCE</button>
+        <button id="importAttendanceBtn" class="secondary" type="button">IMPORT ATTENDANCE JSON</button>
+      </div>
+      <input id="attendanceJsonFile" type="file" accept=".json,application/json" class="hidden">
+      <div class="hint">Expected private manifest: <b>BLE_ATTENDANCE.json</b> in the meeting workspace. Device IDs are retained for evidence; a participant name is shown only when mapped by the host/participant app.</div>
+    </div>
+
+    <div class="continuity-card">
       <div class="continuity-title">Previous Meeting / Continuity</div>
       <div class="hint">Choose an earlier meeting when this is a continuation. Its context will be recorded with the new meeting instead of replacing the new meeting audio.</div>
       <select id="continuityMeeting" style="width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;margin-top:10px">
@@ -252,6 +269,6 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=22"></script>\n<script src="batch.js?v=2"></script>
+<script src="app.js?v=23"></script>\n<script src="batch.js?v=2"></script>
 </body>
 </html>
