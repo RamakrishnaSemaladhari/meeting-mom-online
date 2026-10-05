@@ -315,6 +315,15 @@ def stage_batch(ctx):
         ]}), JSON_MIME
     )
 
+    ctx.p["transcript_json"].write_text(dump({"transcription": [
+        {"offsets": {"from": int(s["start"]*1000), "to": int(s["end"]*1000)}, "text": s["text"]}
+        for s in all_original
+    ]}), encoding="utf-8")
+    ctx.p["translation_json"].write_text(dump({"transcription": [
+        {"offsets": {"from": int(s["start"]*1000), "to": int(s["end"]*1000)}, "text": s["text"]}
+        for s in all_translation
+    ], "result": {"language": "en"}}), encoding="utf-8")
+
     if ctx.p["warnings"].exists():
         warnings.extend(json.loads(ctx.p["warnings"].read_text(encoding="utf-8")))
     ctx.store.upsert_text(ctx.meeting_folder, "PROCESSING_COMPLETE.json", dump({
