@@ -14,11 +14,14 @@ import os
 import subprocess
 from pathlib import Path
 
-from .errors import MomError
-from .drive_store import DriveStore, select_audio
-from .status import now
-from . import ai_understanding as ai_mod
-from .batch_processor import (
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from pipeline.errors import MomError
+from pipeline.drive_store import DriveStore, select_audio
+from pipeline.status import now
+from pipeline import ai_understanding as ai_mod
+from pipeline.batch_processor import (
     _aggregate_batches,
     _build_bilingual_docx,
     _combined_bilingual,
@@ -28,8 +31,8 @@ from .batch_processor import (
     _parse_ai_timestamp,
     BATCH_SECONDS,
 )
-from .validation import validate
-from .docx_builder import build_mom_doc
+from pipeline.validation import validate
+from pipeline.docx_builder import build_mom_doc
 
 WORK = Path(".meeting_work_parallel")
 WHISPER = Path("whisper.cpp/build/bin/whisper-cli")
