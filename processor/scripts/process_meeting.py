@@ -381,11 +381,7 @@ def stage_fail(ctx):
                     f"Workflow step failed before the processor could report: {env('FAILED_STEP', 'unknown')}")
 
 
-STAGES = {"init": stage_init, "whisper": stage_whisper, "translation": stage_translation,
-          "ai": stage_ai, "mom": stage_mom, "fail": stage_fail}
-
-
-def main():
+from pipeline.batch_processor import stage_batch\n\nSTAGES = {"init": stage_init, "whisper": stage_whisper, "translation": stage_translation,\n          "ai": stage_ai, "mom": stage_mom, "batch": stage_batch, "fail": stage_fail}\n\n\ndef main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=list(STAGES) + ["all"], default="all")
     args = parser.parse_args()
