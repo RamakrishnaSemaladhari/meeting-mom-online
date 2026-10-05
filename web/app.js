@@ -979,7 +979,7 @@ async function updateMeetingMetadata() {
     agenda: $("agenda").value.trim(),
     initiator: $("initiator")?.value.trim() || "",
     continuity_source_type: continuitySourceType,
-    continuity_meeting_id: continuitySourceType === "meeting_id" ? ($("continuityMeeting")?.value || "") : "",
+    continuity_meeting_id: continuitySourceType === "meeting_id" ? (($("continuityMeetingId")?.value || "").trim() || $("continuityMeeting")?.value || "") : "",
     continuity_meeting_title: continuitySourceType === "meeting_id" ? getSelectedContinuityTitle() : (continuitySourceType === "mom_file" ? (continuityFileName || "Previous MoM") : "Previous meeting summary"),
     continuity_file_name: continuityFileName || "",
     continuity_summary: continuitySourceType === "summary" ? ($("continuitySummary")?.value || "").trim() : "",
