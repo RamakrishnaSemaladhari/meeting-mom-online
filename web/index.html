@@ -26,6 +26,7 @@
     .hint{font-size:12px;color:#6b7280;margin-top:6px}
 .voice-wrap{display:flex;gap:8px;align-items:stretch}.voice-wrap>input,.voice-wrap>textarea{flex:1}.voice-btn{width:auto;min-width:48px;margin:0;padding:10px 12px}.voice-btn.listening{background:#fee2e2;color:#991b1b}
 .continuity-card{margin-top:16px;padding:16px;border:1px solid #dbe3ee;border-radius:16px;background:#f8fafc}.continuity-title{font-weight:800;font-size:16px}.continuity-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.continuity-actions button{margin-top:8px}
+.optional-card{margin-top:14px;padding:0;border:1px solid #dbe3ee;border-radius:16px;background:#f8fafc;overflow:hidden}.optional-card summary{cursor:pointer;padding:15px 16px;font-weight:800}.optional-card[open]{padding-bottom:14px}.optional-card[open] summary{border-bottom:1px solid #dbe3ee;margin-bottom:2px}.optional-card .hint,.optional-card .grid,.optional-card .status,.optional-card #attendanceList,.optional-card .continuity-actions{margin-left:16px;margin-right:16px}.optional-card .hint{margin-top:10px}
 .recorder-card{margin-top:16px;padding:16px;border:2px solid #e5e7eb;border-radius:18px;background:#fff}.recorder-title{font-weight:800;font-size:18px}.recording-live{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px}.recording-dot{width:10px;height:10px;border-radius:50%;background:#b91c1c}
 
 .filename-preview{margin-top:10px;padding:10px 12px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb;font-size:13px;color:#374151}
@@ -90,26 +91,29 @@
     <label for="agenda">Agenda</label>
     <div class="voice-wrap"><textarea id="agenda" placeholder="Meeting agenda"></textarea><button id="agendaVoice" class="secondary voice-btn" type="button">🎤</button></div>
 
-    <div class="continuity-card">
-      <div class="continuity-title">BLE Attendance Intake</div>
-      <div class="hint">Attendance can arrive from the Meeting Mesh BLE host/participant app. The web UI reads the private attendance manifest from this meeting's Google Drive workspace. No public broadcast is used.</div>
-      <div class="grid" style="margin-top:10px">
-        <div class="field"><label for="attendanceMode">Mode</label><select id="attendanceMode" style="width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px"><option value="HOST">Host</option><option value="PARTICIPANT">Participant</option></select></div>
-        <div class="field"><label for="attendanceCount">Present</label><input id="attendanceCount" value="0" readonly></div>
-      </div>
-      <div id="attendanceStatus" class="status small">BLE attendance not connected.</div>
-      <div id="attendanceList"></div>
-      <div class="continuity-actions">
-        <button id="refreshAttendanceBtn" class="secondary" type="button">REFRESH BLE ATTENDANCE</button>
-        <button id="importAttendanceBtn" class="secondary" type="button">IMPORT ATTENDANCE JSON</button>
-      </div>
-      <input id="attendanceJsonFile" type="file" accept=".json,application/json" class="hidden">
-      <div class="hint">Expected private manifest: <b>BLE_ATTENDANCE.json</b> in the meeting workspace. Device IDs are retained for evidence; a participant name is shown only when mapped by the host/participant app.</div>
+    <label>Participants / Speakers</label>
+    <div id="participants"></div>
+    <button id="addParticipant" class="secondary" type="button">+ Add Participant</button>
+
+    <div class="recorder-card" style="border:3px solid #111827">
+      <div class="recorder-title">Meeting Recorder</div>
+      <div class="hint">Primary workflow: record the meeting here. The recording is saved directly into this meeting's private Google Drive AUDIO folder when you stop.</div>
+      <div id="timer">00:00:00</div>
+      <div class="recording-live"><span id="recordingDot" class="recording-dot hidden"></span><span id="recordingState">Recorder ready</span></div>
+      <button id="startBtn" class="primary" type="button">START RECORDING</button>
+      <button id="stopBtn" class="danger hidden" type="button">STOP & SAVE RECORDING</button>
     </div>
 
-    <div class="continuity-card">
-      <div class="continuity-title">Previous Meeting / Continuity</div>
-      <div class="hint">Choose an earlier meeting when this is a continuation. Its context will be recorded with the new meeting instead of replacing the new meeting audio.</div>
+    <div class="filebox" style="margin-top:16px">
+      <strong>Alternative: Upload Existing Audio</strong>
+      <div class="hint">Use this only when the meeting was already recorded elsewhere. Recording above remains the primary workflow.</div>
+      <input id="audioFile" type="file" accept="audio/*" style="margin-top:12px">
+      <button id="uploadBtn" class="secondary" type="button">UPLOAD EXISTING AUDIO</button>
+    </div>
+
+    <details class="optional-card">
+      <summary>Optional: Previous Meeting / Continuity</summary>
+      <div class="hint">Use this only when the new meeting continues an earlier meeting. Previous context is referenced; the new audio remains a separate meeting record.</div>
       <select id="continuityMeeting" style="width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;margin-top:10px">
         <option value="">No previous meeting — start fresh</option>
       </select>
@@ -118,34 +122,31 @@
         <button id="clearContinuityBtn" class="secondary" type="button">CLEAR CONTINUITY</button>
       </div>
       <div id="continuityStatus" class="hint"></div>
-    </div>
+    </details>
 
-    <label>Participants / Speakers</label>
-    <div id="participants"></div>
-    <button id="addParticipant" class="secondary" type="button">+ Add Participant</button>
-
-    <div class="recorder-card">
-      <div class="recorder-title">Meeting Recorder</div>
-      <div class="hint">Record directly in the browser. The recording is saved to this meeting's AUDIO folder after you stop.</div>
-      <div id="timer">00:00:00</div>
-      <div class="recording-live"><span id="recordingDot" class="recording-dot hidden"></span><span id="recordingState">Recorder ready</span></div>
-      <button id="startBtn" class="primary" type="button">START RECORDING</button>
-      <button id="stopBtn" class="danger hidden" type="button">STOP & SAVE RECORDING</button>
-    </div>
-
-    <div class="filebox">
-      <strong>Audio</strong>
-      <div class="hint">Use a recorded file or the native recorder integration.</div>
-      <input id="audioFile" type="file" accept="audio/*" style="margin-top:12px">
-    </div>
-    <button id="uploadBtn" class="primary" type="button">UPLOAD AUDIO TO GOOGLE DRIVE</button>
+    <details class="optional-card">
+      <summary>Optional: BLE Attendance Intake</summary>
+      <div class="hint">Attendance is presence evidence from Meeting Mesh, separate from speaker labels. The private manifest is kept in this meeting workspace; names appear only when mapped by the host/participant app.</div>
+      <div class="grid" style="margin-top:10px">
+        <div class="field"><label for="attendanceMode">Mode</label><select id="attendanceMode" style="width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px"><option value="HOST">Host</option><option value="PARTICIPANT">Participant</option></select></div>
+        <div class="field"><label for="attendanceCount">Present</label><input id="attendanceCount" value="0" readonly></div>
+      </div>
+      <div id="attendanceStatus" class="status small">Waiting for Meeting Mesh BLE attendance.</div>
+      <div id="attendanceList"></div>
+      <div class="continuity-actions">
+        <button id="refreshAttendanceBtn" class="secondary" type="button">REFRESH BLE ATTENDANCE</button>
+        <button id="importAttendanceBtn" class="secondary" type="button">IMPORT ATTENDANCE JSON</button>
+      </div>
+      <input id="attendanceJsonFile" type="file" accept=".json,application/json" class="hidden">
+      <div class="hint">Expected private manifest: <b>BLE_ATTENDANCE.json</b>. Device IDs are retained as evidence; participant names are shown only when mapped.</div>
+    </details>
 
     <div id="backgroundProcessingCard" class="background-card hidden">
       <div class="background-head">
-        <div class="background-title">Previous Meetings</div>
+        <div class="background-title">Background Processing</div>
         <div class="ready-badge">NEXT MEETING READY</div>
       </div>
-      <div class="hint" style="margin:8px 0 4px">Earlier meetings can continue processing while you record or upload the next meeting.</div>
+      <div class="hint" style="margin:8px 0 4px">Earlier meetings continue processing in the background while you record or prepare the next meeting.</div>
       <div id="backgroundProcessingList"></div>
     </div>
 
@@ -269,6 +270,6 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=23"></script>\n<script src="batch.js?v=2"></script>
+<script src="app.js?v=25"></script>\n<script src="batch.js?v=2"></script>
 </body>
 </html>
