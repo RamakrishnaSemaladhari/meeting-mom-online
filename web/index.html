@@ -24,6 +24,10 @@
     .progress{height:10px;background:#e5e7eb;border-radius:99px;overflow:hidden;margin-top:10px}.progress>div{height:100%;width:0;background:#111827;transition:width .2s}
     .filebox{border:2px dashed #d1d5db;border-radius:16px;padding:18px;text-align:center;margin-top:10px}
     .hint{font-size:12px;color:#6b7280;margin-top:6px}
+.voice-wrap{display:flex;gap:8px;align-items:stretch}.voice-wrap>input,.voice-wrap>textarea{flex:1}.voice-btn{width:auto;min-width:48px;margin:0;padding:10px 12px}.voice-btn.listening{background:#fee2e2;color:#991b1b}
+.continuity-card{margin-top:16px;padding:16px;border:1px solid #dbe3ee;border-radius:16px;background:#f8fafc}.continuity-title{font-weight:800;font-size:16px}.continuity-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.continuity-actions button{margin-top:8px}
+.recorder-card{margin-top:16px;padding:16px;border:2px solid #e5e7eb;border-radius:18px;background:#fff}.recorder-title{font-weight:800;font-size:18px}.recording-live{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px}.recording-dot{width:10px;height:10px;border-radius:50%;background:#b91c1c}
+
 .filename-preview{margin-top:10px;padding:10px 12px;border-radius:12px;background:#f8fafc;border:1px solid #e5e7eb;font-size:13px;color:#374151}
 .results-section{margin-top:14px;padding-top:14px;border-top:1px solid #e5e7eb}
 .results-title{font-size:18px;font-weight:800;margin:0 0 8px}
@@ -73,19 +77,44 @@
     <div class="row"><input id="title" placeholder="e.g. Weekly Sales Review"><button id="titleVoice" class="secondary mini" type="button">🎤</button></div>
     <div id="filenamePreview" class="filename-preview">MoM filename: <b>—</b></div>
 
+    <label for="initiator">Meeting initiator</label>
+    <div class="voice-wrap"><input id="initiator" placeholder="Who initiated the meeting?"><button id="initiatorVoice" class="secondary voice-btn" type="button">🎤</button></div>
+
     <div class="grid">
-      <div class="field"><label for="date">Meeting date</label><input id="date" type="date"></div>
-      <div class="field"><label for="startTime">Start time</label><input id="startTime" type="time"></div>
-      <div class="field"><label for="endTime">End time</label><input id="endTime" type="time"></div>
-      <div class="field"><label for="venue">Venue / Mode</label><input id="venue" placeholder="Office / Online"></div>
+      <div class="field"><label for="date">Meeting date</label><div class="voice-wrap"><input id="date" type="date"><button id="dateVoice" class="secondary voice-btn" type="button">🎤</button></div></div>
+      <div class="field"><label for="startTime">Start time</label><div class="voice-wrap"><input id="startTime" type="time"><button id="startTimeVoice" class="secondary voice-btn" type="button">🎤</button></div></div>
+      <div class="field"><label for="endTime">End time</label><div class="voice-wrap"><input id="endTime" type="time"><button id="endTimeVoice" class="secondary voice-btn" type="button">🎤</button></div></div>
+      <div class="field"><label for="venue">Venue / Mode</label><div class="voice-wrap"><input id="venue" placeholder="Office / Online"><button id="venueVoice" class="secondary voice-btn" type="button">🎤</button></div></div>
     </div>
 
     <label for="agenda">Agenda</label>
-    <div class="row"><textarea id="agenda" placeholder="Meeting agenda"></textarea><button id="agendaVoice" class="secondary mini" type="button">🎤</button></div>
+    <div class="voice-wrap"><textarea id="agenda" placeholder="Meeting agenda"></textarea><button id="agendaVoice" class="secondary voice-btn" type="button">🎤</button></div>
+
+    <div class="continuity-card">
+      <div class="continuity-title">Previous Meeting / Continuity</div>
+      <div class="hint">Choose an earlier meeting when this is a continuation. Its context will be recorded with the new meeting instead of replacing the new meeting audio.</div>
+      <select id="continuityMeeting" style="width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;margin-top:10px">
+        <option value="">No previous meeting — start fresh</option>
+      </select>
+      <div class="continuity-actions">
+        <button id="loadContinuityBtn" class="secondary" type="button">LOAD PREVIOUS DETAILS</button>
+        <button id="clearContinuityBtn" class="secondary" type="button">CLEAR CONTINUITY</button>
+      </div>
+      <div id="continuityStatus" class="hint"></div>
+    </div>
 
     <label>Participants / Speakers</label>
     <div id="participants"></div>
     <button id="addParticipant" class="secondary" type="button">+ Add Participant</button>
+
+    <div class="recorder-card">
+      <div class="recorder-title">Meeting Recorder</div>
+      <div class="hint">Record directly in the browser. The recording is saved to this meeting's AUDIO folder after you stop.</div>
+      <div id="timer">00:00:00</div>
+      <div class="recording-live"><span id="recordingDot" class="recording-dot hidden"></span><span id="recordingState">Recorder ready</span></div>
+      <button id="startBtn" class="primary" type="button">START RECORDING</button>
+      <button id="stopBtn" class="danger hidden" type="button">STOP & SAVE RECORDING</button>
+    </div>
 
     <div class="filebox">
       <strong>Audio</strong>
@@ -93,10 +122,6 @@
       <input id="audioFile" type="file" accept="audio/*" style="margin-top:12px">
     </div>
     <button id="uploadBtn" class="primary" type="button">UPLOAD AUDIO TO GOOGLE DRIVE</button>
-
-    <div id="timer">00:00:00</div>
-    <button id="startBtn" class="primary">START RECORDING</button>
-    <button id="stopBtn" class="danger hidden">STOP & SAVE</button>
 
     <div id="backgroundProcessingCard" class="background-card hidden">
       <div class="background-head">
@@ -227,6 +252,6 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=21"></script>\n<script src="batch.js?v=2"></script>
+<script src="app.js?v=22"></script>\n<script src="batch.js?v=2"></script>
 </body>
 </html>
