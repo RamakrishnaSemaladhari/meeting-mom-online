@@ -344,12 +344,19 @@ def run_understanding(metadata, original_segments, translation_segments, json_fn
         raise MomError("MOM-010", "Whisper produced no timestamped transcript segments.")
     chunks = chunk_segments(original_segments, max_chars)
     sections = []
+    translation_out = []
     for i, chunk in enumerate(chunks, 1):
         if progress:
             progress("ANALYZING", f"Evidence extraction {i}/{len(chunks)}", 60 + int(15 * (i - 1) / len(chunks)))
         raw = json_fn(chunk_prompt(metadata, i, len(chunks), chunk,
                                    translation_for_chunk(chunk, translation_segments)), CHUNK_SCHEMA)
-        sections.append(normalize_chunk(raw))
+        normalized = normalize_chunk(raw)
+        sections.append(normalized)
+        for item in normalized.get("translation", []):
+            translation_out.append({
+                "timestamp": item.get("timestamp", ""),
+                "text": item.get("text", "")
+            })
 
     merged = merge_sections(sections)
     section_texts = [s["section_summary"] for s in sections]
@@ -380,4 +387,5 @@ def run_understanding(metadata, original_segments, translation_segments, json_fn
     result = {k: result[k] for k in OUTPUT_KEYS}
     result["schema_version"] = SCHEMA_VERSION
     result["generated_with"] = {"ai_model": model, "sections": len(chunks)}
+    result["translation_segments"] = translation_out
     return result
