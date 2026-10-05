@@ -71,9 +71,47 @@
     if(!item?.meetingFolderId)return null;
     try{
       const files=await listDriveFiles("'"+item.meetingFolderId+"' in parents and name = 'PROCESSING_STATUS.json' and trashed = false","files(id,name,modifiedTime)");
-      if(!files.length)return null;
-      const r=await driveRequest('https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(files[0].id)+'?alt=media');
-      return await r.json();
+      let root=null;
+      if(files.length){
+        const r=await driveRequest('https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(files[0].id)+'?alt=media');
+        root=await r.json();
+      }
+      // During parallel processing the root status intentionally remains stable so
+      // concurrent workers cannot overwrite one another. Aggregate per-batch status
+      // files to give the user a live progress view.
+      const folders=await listDriveFiles("'"+item.meetingFolderId+"' in parents and name = 'BATCHES' and trashed = false","files(id,name,mimeType)");
+      if(folders.length){
+        const batchFiles=await listDriveFiles("'"+folders[0].id+"' in parents and name contains 'BATCH_STATUS_' and trashed = false","files(id,name)");
+        if(batchFiles.length){
+          let done=0, active=0, failed=0, total=Number(root?.batch_total||batchFiles.length);
+          let latestMessage='';
+          for(const bf of batchFiles){
+            try{
+              const rr=await driveRequest('https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(bf.id)+'?alt=media');
+              const d=await rr.json();
+              if(String(d.status||'').toUpperCase()==='COMPLETED') done++;
+              else if(String(d.status||'').toUpperCase()==='FAILED') failed++;
+              else active++;
+              if(d.message) latestMessage=d.message;
+              total=Math.max(total,Number(d.batch_total||0));
+            }catch(_){}
+          }
+          if(total>0 && (done||active||failed)){
+            return {
+              ...(root||{}),
+              status: failed ? 'FAILED' : done===total ? 'COMPLETED' : 'PROCESSING',
+              stage: failed ? 'FAILED' : done===total ? 'COMPLETED' : 'TRANSCRIBING',
+              progress_percent: Math.min(94, Math.round(done/total*90)+5),
+              batch_index: done,
+              batch_total: total,
+              message: failed ? 'One or more parallel batches failed.' :
+                done===total ? 'All parallel batches complete; final synthesis is starting.' :
+                (latestMessage || ('Parallel batches: '+done+' / '+total+' complete'))
+            };
+          }
+        }
+      }
+      return root;
     }catch(e){return null;}
   }
 
