@@ -59,13 +59,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ollama
-          key: ${{ runner.os }}-ollama-qwen3-4b-instruct-2507-q4_K_M-v1
+          key: ${{ runner.os }}-ollama-qwen3-fast-batch-1.7b-final-4b-v2
 
       - name: Prepare AI model cache
         env:
           AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
+          AI_BATCH_MODEL: qwen3:1.7b-q4_K_M
+          AI_FINAL_MODEL: qwen3:4b-instruct-2507-q4_K_M
           AI_NUM_CTX: 8192
-          AI_NUM_PREDICT: 1400
+          AI_NUM_PREDICT: 1800
+          AI_CHUNK_CHARS: 12000
           OLLAMA_MODELS: /home/runner/.ollama/models
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
@@ -79,8 +82,9 @@ jobs:
           if ollama list | awk 'NR>1 {print $1}' | grep -Fxq "$AI_MODEL"; then
             echo "AI model already cached."
           else
-            echo "Downloading AI model for reusable cache..."
-            ollama pull "$AI_MODEL"
+            echo "Downloading AI models for reusable cache..."
+            ollama pull "qwen3:1.7b-q4_K_M"
+            ollama pull "qwen3:4b-instruct-2507-q4_K_M"
           fi
 
           echo "Reusable processor cache is ready."
@@ -223,8 +227,11 @@ jobs:
       - name: Prepare AI engine on GitHub runner
         env:
           AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
+          AI_BATCH_MODEL: qwen3:1.7b-q4_K_M
+          AI_FINAL_MODEL: qwen3:4b-instruct-2507-q4_K_M
           AI_NUM_CTX: 8192
-          AI_NUM_PREDICT: 1400
+          AI_NUM_PREDICT: 1800
+          AI_CHUNK_CHARS: 12000
           OLLAMA_MODELS: /home/runner/.ollama/models
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
@@ -241,8 +248,9 @@ jobs:
           if ollama list | awk 'NR>1 {print $1}' | grep -Fxq "$AI_MODEL"; then
             echo "AI model restored from cache."
           else
-            echo "AI model cache miss. Downloading model once for the cache..."
-            ollama pull "$AI_MODEL"
+            echo "AI model cache miss. Downloading fast batch + final models once for the cache..."
+            ollama pull "qwen3:1.7b-q4_K_M"
+            ollama pull "qwen3:4b-instruct-2507-q4_K_M"
           fi
 
           echo "AI engine ready."
