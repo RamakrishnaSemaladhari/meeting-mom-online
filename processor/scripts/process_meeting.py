@@ -395,7 +395,10 @@ def stage_batch(ctx):
     })
 
 STAGES = {"init": stage_init, "whisper": stage_whisper, "translation": stage_translation,
-          "ai": stage_ai, "mom": stage_mom, "batch": stage_batch, "fail": stage_fail}\n\n\ndef main():
+          "ai": stage_ai, "mom": stage_mom, "batch": stage_batch, "fail": stage_fail}
+
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=list(STAGES) + ["all"], default="all")
     args = parser.parse_args()
