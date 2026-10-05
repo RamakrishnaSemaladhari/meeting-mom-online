@@ -525,6 +525,7 @@ function initGoogle() {
         restored = restoreMeetingState();
         await ensureAppDriveRoot();
         await populateContinuityMeetings();
+        await readAttendanceManifest();
         if (restored) {
           const existingJob = meetingFolders?.meeting?.id
             ? backgroundProcessing.find(x => x.id === meetingFolders.meeting.id)
@@ -1608,6 +1609,63 @@ function getSelectedContinuityTitle() {
   const select=$("continuityMeeting"); if(!select?.value)return "";
   return select.options[select.selectedIndex]?.textContent.replace(/^.*?—\s*/,"").trim()||"";
 }
+function renderAttendance(data) {
+  const rows=Array.isArray(data?.participants)?data.participants:[];
+  const present=rows.filter(x=>String(x.status||"PRESENT").toUpperCase()==="PRESENT");
+  $("attendanceCount") && ($("attendanceCount").value=String(present.length));
+  $("attendanceStatus") && ($("attendanceStatus").textContent=data?.updated_at
+    ? "BLE attendance updated: "+new Date(data.updated_at).toLocaleString("en-IN")
+    : "Attendance manifest loaded.");
+  const box=$("attendanceList"); if(!box)return;
+  box.innerHTML=rows.length ? rows.map(function(p){
+    const name=escapeHtml(p.name||"Unmapped participant");
+    const device=escapeHtml(p.device_id||"");
+    const statusText=escapeHtml(p.status||"PRESENT");
+    const seen=escapeHtml(p.last_seen||p.timestamp||"");
+    return '<div class="background-row"><div><b>'+name+'</b><div class="muted small">'+device+'</div></div><div class="background-status">'+statusText+(seen?' · '+seen:'')+'</div></div>';
+  }).join("") : '<div class="muted small">No BLE attendance records received yet.</div>';
+}
+async function readAttendanceManifest() {
+  if(!meetingFolders?.meeting?.id || !accessToken) return null;
+  const files=await listDriveFiles("'"+meetingFolders.meeting.id+"' in parents and name = 'BLE_ATTENDANCE.json' and trashed = false","files(id,name,modifiedTime)");
+  if(!files.length) {
+    renderAttendance({participants:[]});
+    $("attendanceStatus") && ($("attendanceStatus").textContent="Waiting for Meeting Mesh BLE attendance...");
+    return null;
+  }
+  const r=await driveRequest("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(files[0].id)+"?alt=media");
+  const data=await r.json();
+  renderAttendance(data);
+  return data;
+}
+async function saveAttendanceManifest(data) {
+  if(!meetingFolders?.meeting?.id || !accessToken) throw new Error("Create/connect the meeting before importing attendance.");
+  const payload={
+    protocol:"meeting-mesh-attendance-v1",
+    meeting_id:meetingFolders.meeting.id,
+    updated_at:new Date().toISOString(),
+    participants:Array.isArray(data?.participants)?data.participants:[]
+  };
+  const files=await listDriveFiles("'"+meetingFolders.meeting.id+"' in parents and name = 'BLE_ATTENDANCE.json' and trashed = false","files(id,name)");
+  if(files.length) {
+    await uploadTextToFile(files[0].id,JSON.stringify(payload,null,2),"application/json");
+  } else {
+    const r=await driveRequest("https://www.googleapis.com/drive/v3/files",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"BLE_ATTENDANCE.json",mimeType:"application/json",parents:[meetingFolders.meeting.id]})});
+    const f=await r.json();
+    await uploadTextToFile(f.id,JSON.stringify(payload,null,2),"application/json");
+  }
+  renderAttendance(payload);
+}
+async function importAttendanceJson(file) {
+  if(!file)return;
+  try {
+    const data=JSON.parse(await file.text());
+    if(!Array.isArray(data.participants)) throw new Error("Attendance JSON must contain a participants array.");
+    await saveAttendanceManifest(data);
+    status("BLE attendance manifest imported into the private meeting workspace.","success");
+  } catch(e) { status("Attendance import failed: "+e.message,"error"); }
+}
+
 async function populateContinuityMeetings() {
   const select=$("continuityMeeting"); if(!select||!accessToken)return;
   try {
@@ -1675,5 +1733,8 @@ document.addEventListener("DOMContentLoaded",function(){
   startFieldVoice($("venueVoice"),$("venue"));
   $("loadContinuityBtn")?.addEventListener("click",loadContinuityMeeting);
   $("clearContinuityBtn")?.addEventListener("click",clearContinuityMeeting);
+  $("refreshAttendanceBtn")?.addEventListener("click",async function(){try{await readAttendanceManifest();}catch(e){status("Attendance refresh failed: "+e.message,"error");}});
+  $("importAttendanceBtn")?.addEventListener("click",function(){$("attendanceJsonFile")?.click();});
+  $("attendanceJsonFile")?.addEventListener("change",function(){importAttendanceJson(this.files?.[0]);});
   updateFilenamePreview(); renderBackgroundProcessing(); initGoogle();
 });
