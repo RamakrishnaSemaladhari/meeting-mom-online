@@ -116,6 +116,67 @@ def whisper_json(wav, base, language):
         raise MomError("MOM-005", f"Whisper JSON is malformed: {exc}")
 
 
+def load_previous_context(store, meeting_folder, continuity_id=""):
+    try:
+        target_id = continuity_id
+        if not target_id:
+            meta = store.get_meta(meeting_folder)
+            parent = (meta.get("parents") or [None])[0]
+            if parent:
+                siblings = [x for x in store.list_children(parent, folders=True) if x["id"] != meeting_folder]
+                siblings.sort(key=lambda x: x.get("createdTime", ""), reverse=True)
+                target_id = siblings[0]["id"] if siblings else ""
+        if not target_id:
+            return None
+
+        children = store.list_children(target_id, folders=True)
+        ai_folder = next((x for x in children if x["name"] == "AI"), None)
+        evidence = store.find_one(ai_folder["id"], "AI Evidence.json") if ai_folder else None
+        if not evidence:
+            return None
+        data = json.loads(store.read_bytes(evidence["id"]).decode("utf-8"))
+        meta_file = store.find_one(target_id, "meeting_metadata.json")
+        previous_meta = {}
+        if meta_file:
+            try:
+                previous_meta = json.loads(store.read_bytes(meta_file["id"]).decode("utf-8"))
+            except Exception:
+                previous_meta = {}
+        return {
+            "meeting_name": previous_meta.get("title") or (store.get_meta(target_id).get("name") if store.get_meta(target_id) else "Previous meeting"),
+            "executive_summary": data.get("executive_summary", data.get("summary", "")),
+            "decisions": data.get("decisions", []),
+            "action_items": data.get("action_items", []),
+            "open_questions": data.get("open_questions", [])
+        }
+    except Exception as exc:
+        log(f"Previous-meeting context ignored: {exc}")
+        return None
+
+
+def load_attendance_manifest(store, meeting_folder):
+    try:
+        manifest = store.find_one(meeting_folder, "BLE_ATTENDANCE.json")
+        if not manifest:
+            return None
+        data = json.loads(store.read_bytes(manifest["id"]).decode("utf-8"))
+        participants = data.get("participants") if isinstance(data, dict) else []
+        if not isinstance(participants, list):
+            participants = []
+        return {
+            "protocol": data.get("protocol", "meeting-mesh-attendance-v1"),
+            "updated_at": data.get("updated_at", ""),
+            "participants": participants,
+            "present_count": sum(
+                1 for p in participants
+                if str(p.get("status", "PRESENT")).upper() == "PRESENT"
+            )
+        }
+    except Exception as exc:
+        log(f"BLE attendance manifest ignored: {exc}")
+        return None
+
+
 def stage_prepare():
     store = DriveStore.from_env()
     meeting = env("MEETING_FOLDER_ID")
@@ -145,6 +206,28 @@ def stage_prepare():
             fh.write(f"batch_total={total}\n")
             fh.write("matrix_json=" + json.dumps(matrix) + "\n")
             fh.write(f"duration_seconds={duration}\n")
+    # Publish a lightweight root status immediately so the UI can show that
+    # automatic batching has started before the first worker finishes.
+    status = {
+        "meeting_id": env("MEETING_ID"),
+        "status": "PROCESSING",
+        "stage": "SPLITTING",
+        "progress_percent": 18,
+        "current_stage": "batch_prepare",
+        "message": f"Prepared {total} automatic 10-minute batch(es). Parallel workers are starting.",
+        "batch_index": 0,
+        "batch_total": total,
+        "duration_seconds": duration,
+        "updated_at": now()
+    }
+    store.upsert_text(env("MEETING_FOLDER_ID"), "PROCESSING_STATUS.json", dump(status), JSON_MIME)
+    store.upsert_text(env("MEETING_FOLDER_ID"), "BATCH_MANIFEST.json", dump({
+        "meeting_id": env("MEETING_ID"),
+        "duration_seconds": duration,
+        "batch_seconds": BATCH_SECONDS,
+        "batch_total": total,
+        "status": "PROCESSING"
+    }), JSON_MIME)
     source.unlink(missing_ok=True)
     return total
 
@@ -171,7 +254,7 @@ def stage_worker():
     total_raw = env("BATCH_TOTAL", "")
     duration_raw = env("MEETING_DURATION_SECONDS", "")
     if not total_raw or not duration_raw:
-        raise MomError("MOM-002", "Parallel finalizer requires BATCH_TOTAL and MEETING_DURATION_SECONDS from a successful prepare job.")
+        raise MomError("MOM-002", "Parallel batch worker requires BATCH_TOTAL and MEETING_DURATION_SECONDS from a successful prepare job.")
     try:
         total = int(total_raw)
         duration = float(duration_raw)
@@ -273,6 +356,14 @@ def stage_finalize():
     if not metadata_file:
         raise MomError("MOM-002", "meeting_metadata.json was not found.")
     metadata = json.loads(store.read_bytes(metadata_file["id"]).decode("utf-8"))
+    previous = load_previous_context(
+        store,
+        meeting,
+        metadata.get("continuity_meeting_id", "")
+    )
+    attendance = load_attendance_manifest(store, meeting)
+    if attendance:
+        metadata["attendance_evidence"] = attendance
     folders = {f["name"]: f["id"] for f in store.list_children(meeting, folders=True)}
     batches_folder = folders.get("BATCHES") or store.ensure_folder(meeting, "BATCHES")
     transcript_folder = folders.get("TRANSCRIPT") or store.ensure_folder(meeting, "TRANSCRIPT")
@@ -333,17 +424,53 @@ def stage_finalize():
 
     final_model = env("AI_FINAL_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
     _, final_text_fn = ai_mod.make_ollama_fns(final_model)
-    previous = None
+
+    store.upsert_text(meeting, "PROCESSING_STATUS.json", dump({
+        "meeting_id": env("MEETING_ID"),
+        "status": "PROCESSING",
+        "stage": "SUMMARIZING",
+        "progress_percent": 84,
+        "current_stage": "final_ai",
+        "message": f"All {total} parallel batches completed. Final AI consolidation is running.",
+        "batch_index": total,
+        "batch_total": total,
+        "updated_at": now()
+    }), JSON_MIME)
+
     # Reuse the established final aggregation logic; all evidence came from the batch workers.
     final_ai = _aggregate_batches(metadata, batch_results, final_text_fn, previous=previous, model=final_model)
+    if attendance:
+        final_ai["attendance_evidence"] = attendance
+    final_ai["continuity"] = {
+        "used": bool(previous),
+        "meeting_name": previous.get("meeting_name", "") if previous else ""
+    }
     final_ai["batch_manifest"] = {
         "total": total, "batch_seconds": BATCH_SECONDS, "duration_seconds": duration,
         "parallel": True, "batch_ai_model": env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M"),
         "final_ai_model": final_model
     }
+    store.upsert_text(meeting, "PROCESSING_STATUS.json", dump({
+        "meeting_id": env("MEETING_ID"),
+        "status": "PROCESSING",
+        "stage": "GENERATING_MOM",
+        "progress_percent": 92,
+        "current_stage": "validation",
+        "message": "Final AI consolidation complete. Validating evidence and preparing the final MoM.",
+        "batch_index": total,
+        "batch_total": total,
+        "updated_at": now()
+    }), JSON_MIME)
+
     validated, report = validate(final_ai, all_original, all_translation)
     evidence = dict(validated, summary=validated.get("executive_summary", ""),
                     validated=True, validation_report=report)
+    if attendance:
+        evidence["attendance_evidence"] = attendance
+    evidence["continuity"] = {
+        "used": bool(previous),
+        "meeting_name": previous.get("meeting_name", "") if previous else ""
+    }
     store.upsert_text(ai_folder, "AI Evidence.json", dump(evidence), JSON_MIME)
     store.upsert_text(ai_folder, "AI Understanding.json", dump(dict(validated, validated=True)), JSON_MIME)
     store.upsert_text(ai_folder, "Complete Conversation Summary.txt",
@@ -360,7 +487,9 @@ def stage_finalize():
         "meeting_id": env("MEETING_ID"), "status": "complete", "completed_at": now(),
         "ai_model": final_model, "outputs": {"mom_docx": docx_name,
         "executive_summary": True, "complete_conversation_summary": True},
-        "validation": report, "parallel_batches": total
+        "validation": report, "parallel_batches": total,
+        "attendance_present_count": attendance.get("present_count", 0) if attendance else 0,
+        "continuity_used": bool(previous)
     }), JSON_MIME)
     # Root status is written only once, after all parallel workers have succeeded.
     status = {
