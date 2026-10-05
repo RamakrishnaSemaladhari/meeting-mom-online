@@ -20,7 +20,7 @@ class OnlinePipelineContractTests(unittest.TestCase):
     def test_staged_understanding_keeps_required_outputs(self):
         prompts = []
 
-        def fake_json(prompt):
+        def fake_json(prompt, schema=None):
             prompts.append(prompt)
             return {
                 "section_summary": "The meeting reviewed the renewal backlog and discussed unresolved two wheeler cases.",
