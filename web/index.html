@@ -61,7 +61,15 @@
 .background-title{font-weight:800;font-size:16px}
 .ready-badge{padding:5px 9px;border-radius:999px;background:#ecfdf5;color:#065f46;font-size:12px;font-weight:800}
 .background-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:11px 0;border-top:1px solid #e5e7eb}
-.background-status{font-size:12px;font-weight:700;color:#374151;text-align:right}
+.background-status{font-size:12px;font-weight:700;color:#374151;text-align:right}.app-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.app-actions button{margin-top:0}
+.continuity-source{margin-top:12px;padding:12px;border:1px solid #dbe3ee;border-radius:14px;background:#fff}
+.continuity-source-tabs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}.continuity-source-tabs button{margin:0;padding:10px 6px;font-size:12px}
+.continuity-source-tabs button.active{background:#111827;color:#fff}
+.continuity-panel{margin-top:10px}.continuity-panel.hidden{display:none!important}
+.continuity-panel input[type=file]{font-size:13px}
+.continuity-summary{min-height:120px!important}
+.source-badge{display:inline-block;margin-top:8px;padding:4px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:11px;font-weight:700}
+
   </style>
 </head>
 <body>
@@ -71,6 +79,10 @@
     <div class="muted">Record / Upload → Understand → Minutes</div>
     <div id="status" class="status">Ready to connect Google Drive.</div>
     <button id="connectBtn" class="primary">Continue with Google</button>
+    <div id="appActions" class="app-actions hidden">
+      <button id="newMeetingBtn" class="secondary" type="button">＋ NEW MEETING</button>
+      <button id="homeMeetingBtn" class="secondary" type="button">HOME</button>
+    </div>
   </div>
 
   <div id="meetingCard" class="card hidden">
@@ -113,17 +125,47 @@
 
     <details class="optional-card">
       <summary>Optional: Previous Meeting / Continuity</summary>
-      <div class="hint">Use this only when the new meeting continues an earlier meeting. Previous context is referenced; the new audio remains a separate meeting record.</div>
-      <select id="continuityMeeting" style="width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;margin-top:10px">
-        <option value="">No previous meeting — start fresh</option>
-      </select>
+      <div class="hint">Use continuity only when the new meeting continues a previous discussion. Choose a previous meeting by ID, upload the previous physical MoM, or paste/speak a previous-meeting summary.</div>
+
+      <div class="continuity-source">
+        <div class="continuity-source-tabs">
+          <button id="continuityIdTab" class="secondary active" type="button">MEETING ID</button>
+          <button id="continuityFileTab" class="secondary" type="button">PREVIOUS MoM</button>
+          <button id="continuitySummaryTab" class="secondary" type="button">SUMMARY</button>
+        </div>
+
+        <div id="continuityIdPanel" class="continuity-panel">
+          <label for="continuityMeeting">Previous meeting</label>
+          <select id="continuityMeeting" style="width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px">
+            <option value="">No previous meeting — start fresh</option>
+          </select>
+          <div class="hint">Select an existing Meeting MoM workspace. The processor uses its verified AI evidence.</div>
+        </div>
+
+        <div id="continuityFilePanel" class="continuity-panel hidden">
+          <label for="continuityFile">Previous physical MoM</label>
+          <input id="continuityFile" type="file" accept=".docx,.pdf,.txt,.md,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+          <div id="continuityFileStatus" class="hint">Upload the previous MoM. Its text will be extracted and stored privately with this meeting as continuity evidence.</div>
+        </div>
+
+        <div id="continuitySummaryPanel" class="continuity-panel hidden">
+          <label for="continuitySummary">Previous meeting summary</label>
+          <div class="voice-wrap">
+            <textarea id="continuitySummary" class="continuity-summary" placeholder="Paste or speak the previous meeting summary"></textarea>
+            <button id="continuitySummaryVoice" class="secondary voice-btn" type="button">🎤</button>
+          </div>
+          <div class="hint">This summary becomes explicit continuity context for the final AI consolidation.</div>
+        </div>
+
+        <div id="continuitySourceBadge" class="source-badge">No continuity selected</div>
+      </div>
+
       <div class="continuity-actions">
-        <button id="loadContinuityBtn" class="secondary" type="button">LOAD PREVIOUS DETAILS</button>
+        <button id="loadContinuityBtn" class="secondary" type="button">LOAD CONTINUITY</button>
         <button id="clearContinuityBtn" class="secondary" type="button">CLEAR CONTINUITY</button>
       </div>
       <div id="continuityStatus" class="hint"></div>
     </details>
-
     <details class="optional-card">
       <summary>Optional: BLE Attendance Intake</summary>
       <div class="hint">Attendance is presence evidence from Meeting Mesh, separate from speaker labels. The private manifest is kept in this meeting workspace; names appear only when mapped by the host/participant app.</div>
@@ -270,6 +312,6 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=26"></script>\n<script src="batch.js?v=2"></script>
+<script src="app.js?v=27"></script>\n<script src="batch.js?v=2"></script>
 </body>
 </html>
