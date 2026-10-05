@@ -1056,7 +1056,7 @@ async function stopMeeting() {
       await notifyProcessingStarted(completedMeeting);
       addBackgroundProcessing(completedMeeting, "Processing started");
       pendingProcessingMeeting = null;
-      status("Meeting 1 is processing in the background. READY FOR NEXT MEETING.", "success");
+      status("Meeting 1 is queued for processing. READY FOR NEXT MEETING.", "success");
     } catch (triggerErr) {
       addBackgroundProcessing(completedMeeting, "Waiting to start processing");
       status("Meeting 1 audio is safely stored. Processing could not be started automatically: " + triggerErr.message, "error");
@@ -1094,7 +1094,7 @@ async function uploadSelectedAudio() {
     try {
       await notifyProcessingStarted(completedMeeting);
       pendingProcessingMeeting = null;
-      status("Audio is safely stored and processing has started. READY FOR NEXT MEETING.", "success");
+      status("Audio is safely stored. Processing request queued. READY FOR NEXT MEETING.", "success");
     } catch (triggerErr) {
       addBackgroundProcessing(completedMeeting, "Waiting to start processing");
       status("Audio is safely stored. Processing could not be started automatically: " + triggerErr.message, "error");
@@ -1245,7 +1245,7 @@ async function notifyProcessingStarted(snapshot, options) {
         "Content-Type": "text/plain;charset=UTF-8"
       },
       body: JSON.stringify({
-        action: "triggerProcessing",
+        action: "start_processing",
         meeting_id: snapshot.meeting.id,
         meeting_folder_id: snapshot.meeting.id,
         audio_folder_id: snapshot.audio.id,
@@ -1257,7 +1257,7 @@ async function notifyProcessingStarted(snapshot, options) {
     throw new Error("Processing gateway request could not be sent: " + err.message);
   }
 
-  const item = addBackgroundProcessing(snapshot, "Processing request sent", {
+  const item = addBackgroundProcessing(snapshot, "Processing request queued — waiting for GitHub Actions", {
     stage: "checking",
     percent: 5
   });
@@ -1291,7 +1291,7 @@ async function findAndMonitorLatestRun(item,requestStarted) {
     const data=await r.json();
     const since=Date.parse(requestStarted)-30000;
     const run=(data.workflow_runs||[]).find(function(x){return Date.parse(x.created_at)>=since;});
-    if (!run) { setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000); return; }
+    if (!run) { updateBackgroundProcessing(item.id,{statusText:"Processing request sent — waiting for GitHub Actions"}); setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000); return; }
     updateBackgroundProcessing(item.id,{runId:run.id,statusText:run.status==="completed" ? (run.conclusion==="success" ? "Processing complete" : "Processing failed") : "Processing started",percent:run.status==="completed"&&run.conclusion==="success"?100:8});
     monitorWorkflowRun(Object.assign({},item,{runId:run.id}));
   } catch(e) { setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},15000); }
