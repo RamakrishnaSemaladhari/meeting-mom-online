@@ -316,8 +316,14 @@ async function saveContinuityContext() {
   let sourceName = "";
 
   if (continuitySourceType === "meeting_id") {
-    if (!$("continuityMeeting")?.value) throw new Error("Select a previous meeting first.");
-    sourceName = getSelectedContinuityTitle();
+    const directId = ($("continuityMeetingId")?.value || "").trim();
+    if (directId) {
+      sourceName = "Previous meeting " + directId;
+    } else if ($("continuityMeeting")?.value) {
+      sourceName = getSelectedContinuityTitle();
+    } else {
+      throw new Error("Select a previous meeting or paste its Meeting ID.");
+    }
   } else if (continuitySourceType === "mom_file") {
     if (!continuityFileText.trim()) throw new Error("Select and load a previous MoM file first.");
     text = continuityFileText.trim();
@@ -799,7 +805,10 @@ async function recoverLatestMeeting() {
     if (metadataData.agenda) $("agenda").value = metadataData.agenda;
     if (metadataData.initiator) $("initiator").value = metadataData.initiator;
     continuitySourceType = metadataData.continuity_source_type || (metadataData.continuity_meeting_id ? "meeting_id" : "meeting_id");
-    if (metadataData.continuity_meeting_id) $("continuityMeeting").value = metadataData.continuity_meeting_id;
+    if (metadataData.continuity_meeting_id) {
+      $("continuityMeeting").value = metadataData.continuity_meeting_id;
+      $("continuityMeetingId").value = metadataData.continuity_meeting_id;
+    }
     if (metadataData.continuity_summary) $("continuitySummary").value = metadataData.continuity_summary;
     continuityFileName = metadataData.continuity_file_name || "";
     setContinuitySource(continuitySourceType);
@@ -882,7 +891,9 @@ async function createMeetingWorkspace() {
     agenda: $("agenda").value.trim(),
     initiator: $("initiator")?.value.trim() || "",
     continuity_source_type: continuitySourceType,
-    continuity_meeting_id: continuitySourceType === "meeting_id" ? ($("continuityMeeting")?.value || "") : "",
+    continuity_meeting_id: continuitySourceType === "meeting_id"
+      ? (($("continuityMeetingId")?.value || "").trim() || $("continuityMeeting")?.value || "")
+      : "",
     continuity_meeting_title: continuitySourceType === "meeting_id" ? getSelectedContinuityTitle() : (continuitySourceType === "mom_file" ? (continuityFileName || "Previous MoM") : "Previous meeting summary"),
     continuity_file_name: continuityFileName || "",
     continuity_summary: continuitySourceType === "summary" ? ($("continuitySummary")?.value || "").trim() : "",
@@ -905,6 +916,9 @@ async function createMeetingWorkspace() {
   audioUploaded = false;
   persistMeetingState();
   await uploadTextToFile(metaFile.id, JSON.stringify(metadata,null,2), "application/json");
+  if (continuitySourceType !== "meeting_id" && (continuityFileText || ($("continuitySummary")?.value || "").trim())) {
+    await saveContinuityContext();
+  }
   return meetingFolders;
 }
 
@@ -1919,7 +1933,7 @@ function loadContinuityMeeting() {
     saveContinuityContext().catch(e=>status(e.message,"error"));
     return;
   }
-  const id=$("continuityMeeting")?.value;
+  const id=($("continuityMeetingId")?.value || $("continuityMeeting")?.value || "").trim();
   if(!id){clearContinuityMeeting();return;}
   (async function(){
     try {
@@ -1946,6 +1960,7 @@ function clearContinuityMeeting() {
   continuityFileText = "";
   continuityFileName = "";
   if ($("continuityMeeting")) $("continuityMeeting").value="";
+  if ($("continuityMeetingId")) $("continuityMeetingId").value="";
   if ($("continuitySummary")) $("continuitySummary").value="";
   if ($("continuityFile")) $("continuityFile").value="";
   if ($("continuityFileStatus")) $("continuityFileStatus").textContent="Upload the previous MoM. Its text will be extracted and stored privately with this meeting as continuity evidence.";
@@ -2079,7 +2094,8 @@ document.addEventListener("DOMContentLoaded",function(){
   $("continuityIdTab")?.addEventListener("click",()=>setContinuitySource("meeting_id"));
   $("continuityFileTab")?.addEventListener("click",()=>setContinuitySource("mom_file"));
   $("continuitySummaryTab")?.addEventListener("click",()=>setContinuitySource("summary"));
-  $("continuityMeeting")?.addEventListener("change",()=>setContinuitySource("meeting_id"));
+  $("continuityMeeting")?.addEventListener("change",()=>{if ($("continuityMeeting").value) $("continuityMeetingId").value=""; setContinuitySource("meeting_id");});
+  $("continuityMeetingId")?.addEventListener("input",()=>{if ($("continuityMeetingId").value.trim()) $("continuityMeeting").value=""; setContinuitySource("meeting_id");});
   $("continuitySummaryVoice") && startFieldVoice($("continuitySummaryVoice"),$("continuitySummary"));
   $("continuitySummary")?.addEventListener("input",()=>{continuitySourceType="summary";setContinuitySource("summary");});
   $("continuityFile")?.addEventListener("change",async function(){
