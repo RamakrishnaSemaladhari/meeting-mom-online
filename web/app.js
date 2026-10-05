@@ -246,6 +246,15 @@ function prepareNextMeeting() {
   $("endTime").value = "";
   $("venue").value = "";
   $("agenda").value = "";
+  if ($("meetingType")) $("meetingType").value = "meeting_mom";
+  if ($("meetingSubtype")) $("meetingSubtype").value = "daily_meeting";
+  if ($("learningContext")) $("learningContext").value = "";
+  if ($("caseReference")) $("caseReference").value = "";
+  if ($("legalObjective")) $("legalObjective").value = "";
+  if ($("verificationDocuments")) $("verificationDocuments").value = "";
+  if ($("draftingInstruction")) $("draftingInstruction").value = "";
+  if ($("sessionNotes")) $("sessionNotes").value = "";
+  updateTypeUI();
   $("participants").innerHTML = "";
   $("audioFile").value = "";
   if ($("continuityMeeting")) $("continuityMeeting").value = "";
@@ -804,6 +813,14 @@ async function recoverLatestMeeting() {
     if (metadataData.venue) $("venue").value = metadataData.venue;
     if (metadataData.agenda) $("agenda").value = metadataData.agenda;
     if (metadataData.initiator) $("initiator").value = metadataData.initiator;
+    if (metadataData.meeting_type) $("meetingType").value = metadataData.meeting_type;
+    if (metadataData.meeting_subtype) $("meetingSubtype").value = metadataData.meeting_subtype;
+    if (metadataData.learning_context) $("learningContext").value = metadataData.learning_context;
+    if (metadataData.case_reference) $("caseReference").value = metadataData.case_reference;
+    if (metadataData.legal_objective) $("legalObjective").value = metadataData.legal_objective;
+    if (metadataData.drafting_instruction) $("draftingInstruction").value = metadataData.drafting_instruction;
+    if (metadataData.session_notes) $("sessionNotes").value = metadataData.session_notes;
+    updateTypeUI();
     continuitySourceType = metadataData.continuity_source_type || (metadataData.continuity_meeting_id ? "meeting_id" : "meeting_id");
     if (metadataData.continuity_meeting_id) {
       $("continuityMeeting").value = metadataData.continuity_meeting_id;
@@ -877,13 +894,20 @@ async function createMeetingWorkspace() {
   // Meeting workspaces belong under the established INBOX.
   const meetingFolder = await createFolder(stamp+"_"+title, DRIVE_INBOX_ID);
 
-  const names = ["AUDIO","TRANSCRIPT","TRANSLATION","AI","MOM"];
+  const names = ["AUDIO","TRANSCRIPT","TRANSLATION","AI","MOM","REFERENCE_DOCUMENTS"];
   const folders = {};
   for (const name of names) folders[name] = await createFolder(name, meetingFolder.id);
 
   const metadata = {
     meeting_id: stamp,
     title: $("title").value.trim(),
+    meeting_type: $("meetingType")?.value || "meeting_mom",
+    meeting_subtype: $("meetingSubtype")?.value || "general",
+    learning_context: $("learningContext")?.value.trim() || "",
+    case_reference: $("caseReference")?.value.trim() || "",
+    legal_objective: $("legalObjective")?.value.trim() || "",
+    drafting_instruction: $("draftingInstruction")?.value.trim() || "",
+    session_notes: $("sessionNotes")?.value.trim() || "",
     date: $("date").value,
     start_time: $("startTime").value,
     end_time: $("endTime").value,
@@ -912,7 +936,7 @@ async function createMeetingWorkspace() {
   });
   const metaFile = await meta.json();
 
-  meetingFolders = {meeting:meetingFolder,audio:folders.AUDIO,transcript:folders.TRANSCRIPT,translation:folders.TRANSLATION,ai:folders.AI,mom:folders.MOM,metadata:metaFile};
+  meetingFolders = {meeting:meetingFolder,audio:folders.AUDIO,transcript:folders.TRANSCRIPT,translation:folders.TRANSLATION,ai:folders.AI,mom:folders.MOM,referenceDocuments:folders.REFERENCE_DOCUMENTS,metadata:metaFile};
   audioUploaded = false;
   persistMeetingState();
   await uploadTextToFile(metaFile.id, JSON.stringify(metadata,null,2), "application/json");
@@ -939,6 +963,13 @@ async function updateMeetingMetadata() {
   const metadata = {
     meeting_id: meetingFolders.meeting.id,
     title: $("title").value.trim(),
+    meeting_type: $("meetingType")?.value || "meeting_mom",
+    meeting_subtype: $("meetingSubtype")?.value || "general",
+    learning_context: $("learningContext")?.value.trim() || "",
+    case_reference: $("caseReference")?.value.trim() || "",
+    legal_objective: $("legalObjective")?.value.trim() || "",
+    drafting_instruction: $("draftingInstruction")?.value.trim() || "",
+    session_notes: $("sessionNotes")?.value.trim() || "",
     date: $("date").value,
     start_time: $("startTime").value,
     end_time: $("endTime").value,
@@ -966,10 +997,31 @@ async function updateMeetingMetadata() {
   return metadata;
 }
 
+async function uploadReferenceDocuments() {
+  const input = $("verificationDocuments");
+  const files = input?.files ? Array.from(input.files) : [];
+  if (!files.length) return [];
+  if (!meetingFolders?.referenceDocuments?.id) throw new Error("Reference document folder is not available.");
+  const uploaded = [];
+  for (const file of files) {
+    const result = await uploadBlobToDrive(
+      meetingFolders.referenceDocuments.id,
+      file.name,
+      file,
+      file.type || "application/octet-stream"
+    );
+    uploaded.push(result);
+  }
+  input.value = "";
+  return uploaded;
+}
+
 async function uploadAudio(file) {
   if (!file) throw new Error("Please select an audio file first.");
   setAudioControlsBusy(true, "Uploading audio to Google Drive...");
   if (!meetingFolders) await createMeetingWorkspace();
+  await uploadReferenceDocuments();
+  await updateMeetingMetadata();
 
   $("uploadBox").classList.remove("hidden");
   $("uploadText").textContent = "Starting upload: "+file.name;
@@ -1083,6 +1135,7 @@ async function startMeeting() {
       throw new Error("This browser does not support microphone recording. Use Chrome or Edge on HTTPS.");
     }
     await createMeetingWorkspace();
+    await uploadReferenceDocuments();
     await updateMeetingMetadata();
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -1945,6 +1998,14 @@ function loadContinuityMeeting() {
         if(m.venue) $("venue").value=m.venue;
         if(m.agenda) $("agenda").value=m.agenda;
         if(m.initiator) $("initiator").value=m.initiator;
+        if(m.meeting_type) $("meetingType").value=m.meeting_type;
+        if(m.meeting_subtype) $("meetingSubtype").value=m.meeting_subtype;
+        if(m.learning_context) $("learningContext").value=m.learning_context;
+        if(m.case_reference) $("caseReference").value=m.case_reference;
+        if(m.legal_objective) $("legalObjective").value=m.legal_objective;
+        if(m.drafting_instruction) $("draftingInstruction").value=m.drafting_instruction;
+        if(m.session_notes) $("sessionNotes").value=m.session_notes;
+        updateTypeUI();
         if(Array.isArray(m.participants)){$("participants").innerHTML="";m.participants.forEach(p=>addParticipant(p));}
         updateFilenamePreview();
       }
@@ -2071,6 +2132,50 @@ function clearContinuityMeeting() {
 }
 
 
+function updateTypeUI() {
+  const type = $("meetingType")?.value || "meeting_mom";
+  const subtype = $("meetingSubtype");
+  const legal = type === "legal_client_case" || type === "legal_stage_1_analysis" ||
+                type === "legal_stage_2_verification" || type === "legal_stage_3_drafting";
+  const show = (id, yes) => $(id)?.classList.toggle("visible", !!yes);
+  show("lectureFields", type === "lecture_learning");
+  show("legalFields", legal);
+  show("verificationFields", type === "legal_stage_2_verification" || type === "continuity_comparison");
+  show("draftingFields", type === "legal_stage_3_drafting");
+  if (subtype) {
+    const defaults = {
+      meeting_mom: ["daily_meeting","weekly_meeting","monthly_meeting","review_meeting","planning_meeting","project_meeting","general"],
+      notes: ["personal_notes","meeting_notes","field_notes","case_notes","general"],
+      lecture_learning: ["private_lecture","classroom","public_lecture","training","self_learning"],
+      business_management: ["daily_management","weekly_review","sales_review","operations","strategy","project_review","general"],
+      hr_interview: ["interview","appraisal","employee_discussion","professional_discussion","onboarding"],
+      legal_client_case: ["client_consultation","case_discussion","strategy_discussion","legal_update"],
+      legal_stage_1_analysis: ["facts_issues","provisions_charges","case_strategy","risk_analysis"],
+      legal_stage_2_verification: ["document_verification","evidence_cross_check","title_document_review","case_document_review"],
+      legal_stage_3_drafting: ["notice","reply","petition","agreement","opinion","other_drafting"],
+      continuity_comparison: ["previous_mom","document_comparison","business_continuity","handover","project_history"]
+    };
+    const labels = {
+      daily_meeting:"Daily Meeting",weekly_meeting:"Weekly Meeting",monthly_meeting:"Monthly Meeting",review_meeting:"Review Meeting",
+      planning_meeting:"Planning Meeting",project_meeting:"Project Meeting",general:"General",personal_notes:"Personal Notes",
+      meeting_notes:"Meeting Notes",field_notes:"Field Notes",case_notes:"Case Notes",private_lecture:"Private Lecture",
+      classroom:"Classroom",public_lecture:"Public Lecture",training:"Training",self_learning:"Self Learning",
+      daily_management:"Daily Management",weekly_review:"Weekly Review",sales_review:"Sales Review",operations:"Operations",
+      strategy:"Strategy",project_review:"Project Review",interview:"Interview",appraisal:"Appraisal",employee_discussion:"Employee Discussion",
+      professional_discussion:"Professional Discussion",onboarding:"Onboarding",client_consultation:"Client Consultation",
+      case_discussion:"Case Discussion",strategy_discussion:"Strategy Discussion",legal_update:"Legal Update",facts_issues:"Facts / Issues",
+      provisions_charges:"Possible Provisions / Charges",case_strategy:"Case Strategy",risk_analysis:"Risk Analysis",
+      document_verification:"Document Verification",evidence_cross_check:"Evidence Cross-check",title_document_review:"Title / Document Review",
+      case_document_review:"Case Document Review",notice:"Notice",reply:"Reply",petition:"Petition",agreement:"Agreement",
+      opinion:"Legal Opinion",other_drafting:"Other Drafting",previous_mom:"Previous MoM",document_comparison:"Document Comparison",
+      business_continuity:"Business Continuity",handover:"Handover",project_history:"Project History"
+    };
+    const list = defaults[type] || defaults.meeting_mom;
+    const old = subtype.value;
+    subtype.innerHTML = list.map(v => '<option value="' + v + '">' + (labels[v] || v) + '</option>').join("");
+    subtype.value = list.includes(old) ? old : list[0];
+  }
+}
 document.addEventListener("DOMContentLoaded",function(){
   $("connectBtn")?.addEventListener("click",connectGoogle);
   $("addParticipant")?.addEventListener("click",function(){addParticipant();});
@@ -2078,7 +2183,10 @@ document.addEventListener("DOMContentLoaded",function(){
   $("startBtn")?.addEventListener("click",startMeeting);
   $("stopBtn")?.addEventListener("click",stopMeeting);
   $("audioFile")?.addEventListener("change",function(){const f=$("audioFile").files[0];if(f)status("Audio selected: "+f.name+". Ready to upload.","");});
-  ["title","date","startTime","endTime","venue","agenda"].forEach(function(id){$(id)?.addEventListener("input",updateFilenamePreview);});
+  ["title","date","startTime","endTime","venue","agenda","sessionNotes","learningContext","caseReference","legalObjective","draftingInstruction"].forEach(function(id){$(id)?.addEventListener("input",function(){updateFilenamePreview(); if(meetingFolders) updateMeetingMetadata().catch(()=>{});});});
+  $("meetingType")?.addEventListener("change",function(){updateTypeUI(); if(meetingFolders) updateMeetingMetadata().catch(()=>{});});
+  $("meetingSubtype")?.addEventListener("change",function(){if(meetingFolders) updateMeetingMetadata().catch(()=>{});});
+  updateTypeUI();
   [["editSummaryBtn","editSummary"],["editDecisionsBtn","editDecisions"],["editActionsBtn","editActions"],["editFollowupBtn","editFollowup"],["editMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){toggleEditor(x[1],x[0]);});});
   [["copySummaryBtn","editSummary"],["copyDecisionsBtn","editDecisions"],["copyActionsBtn","editActions"],["copyFollowupBtn","editFollowup"],["copyMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){copyField(x[1]);});});
   [["listenSummaryBtn","editSummary"],["listenDecisionsBtn","editDecisions"],["listenActionsBtn","editActions"],["listenFollowupBtn","editFollowup"],["listenMomBtn","editMom"]].forEach(function(x){$(x[0])?.addEventListener("click",function(){listenField(x[1]);});});
