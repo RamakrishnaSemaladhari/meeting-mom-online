@@ -9,12 +9,6 @@ from . import ai_understanding as ai_mod
 from .docx_builder import build_mom_doc
 from .validation import validate
 
-from process_meeting import (
-    env, load_metadata, select_audio, fmt_ts, run_cmd, transcribe_with_gate,
-    whisper_json, detected_language, language_hint, timestamped_text,
-    publish_ai_outputs, WORK, DOCX_MIME, JSON_MIME, dump, now, log, WHISPER_MODEL
-)
-
 BATCH_SECONDS = int(env("BATCH_SECONDS", "600"))
 
 def _ffprobe_duration(path):
