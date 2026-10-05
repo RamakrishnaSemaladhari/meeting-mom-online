@@ -57,6 +57,33 @@ def build_mom_doc(metadata, ai):
             f"{p.get('name', '')}" + (f" ({p['designation']})" if p.get("designation") else "")
             if isinstance(p, dict) else str(p) for p in participants)
 
+    attendance = metadata.get("attendance_evidence") or ai.get("attendance_evidence") or {}
+    if attendance:
+        doc.add_heading("Attendance Evidence", level=1)
+        participants = attendance.get("participants") or []
+        _table(
+            doc,
+            ["Participant", "Device ID", "Status", "Last Seen"],
+            [(
+                p.get("name") or "Unmapped participant",
+                p.get("device_id", ""),
+                p.get("status", "PRESENT"),
+                p.get("last_seen", p.get("timestamp", ""))
+            ) for p in participants],
+            "No BLE attendance records were provided."
+        )
+        doc.add_paragraph(
+            f"Present count: {attendance.get('present_count', len([p for p in participants if str(p.get('status', 'PRESENT')).upper() == 'PRESENT']))}"
+        )
+
+    continuity = ai.get("continuity") or {}
+    if continuity.get("used"):
+        doc.add_heading("Previous Meeting Continuity", level=1)
+        doc.add_paragraph(
+            "This meeting was processed as a continuation of: " +
+            str(continuity.get("meeting_name") or "Previous meeting")
+        )
+
     doc.add_heading("Executive Summary", level=1)
     _paragraphs(doc, ai.get("executive_summary"))
     doc.add_heading("Complete Conversation Summary", level=1)
