@@ -1,5 +1,4 @@
-"""Thin Google Drive wrapper.  All Drive access goes through here so the rest
-of the pipeline can be tested with a fake store."""
+"""Thin Google Drive wrapper for the Online processor.\n\nOnline storage uses Google Drive through user OAuth 2.0 only.\nThe legacy service-account path is intentionally unsupported.\n"""
 import io
 import json
 import os
@@ -19,47 +18,36 @@ class DriveStore:
     @classmethod
     def from_env(cls):
         from googleapiclient.discovery import build
+        from google.oauth2.credentials import Credentials
 
-        # Service accounts have no My Drive storage quota. When an OAuth refresh
-        # token is configured, authenticate as the human Drive user so files
-        # created in My Drive consume that user's quota and remain in the user's
-        # meeting folders. This is the preferred online deployment mode.
         refresh_token = os.environ.get("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
         client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
         client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
-        if not refresh_token:
-            raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-            if raw:
-                try:
-                    candidate = json.loads(raw)
-                    refresh_token = str(candidate.get("refresh_token") or "").strip()
-                    client_id = client_id or str(candidate.get("client_id") or "").strip()
-                    client_secret = client_secret or str(candidate.get("client_secret") or "").strip()
-                except ValueError:
-                    pass
-        if refresh_token:
-            if not client_id:
-                raise MomError("MOM-002", "GOOGLE_OAUTH_CLIENT_ID is required when GOOGLE_OAUTH_REFRESH_TOKEN is configured.")
-            from google.oauth2.credentials import Credentials
-            creds = Credentials(
-                token=None,
-                refresh_token=refresh_token,
-                token_uri="https://oauth2.googleapis.com/token",
-                client_id=client_id,
-                client_secret=client_secret or None,
-                scopes=SCOPES,
-            )
-            return cls(build("drive", "v3", credentials=creds, cache_discovery=False))
 
-        raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-        if not raw:
-            raise MomError("MOM-002", "Configure GOOGLE_OAUTH_REFRESH_TOKEN + GOOGLE_OAUTH_CLIENT_ID for My Drive output, or GOOGLE_SERVICE_ACCOUNT_JSON for shared-drive-compatible processing.")
-        try:
-            info = json.loads(raw)
-        except ValueError:
-            raise MomError("MOM-002", "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.")
-        from google.oauth2 import service_account
-        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+        if not refresh_token:
+            raise MomError(
+                "MOM-002",
+                "GOOGLE_OAUTH_REFRESH_TOKEN is required for Online Google Drive access."
+            )
+        if not client_id:
+            raise MomError(
+                "MOM-002",
+                "GOOGLE_OAUTH_CLIENT_ID is required for Online Google Drive OAuth."
+            )
+        if not client_secret:
+            raise MomError(
+                "MOM-002",
+                "GOOGLE_OAUTH_CLIENT_SECRET is required for Online Google Drive OAuth."
+            )
+
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=SCOPES,
+        )
         return cls(build("drive", "v3", credentials=creds, cache_discovery=False))
 
     @staticmethod
@@ -148,13 +136,6 @@ class DriveStore:
                 body={"name": name, "parents": [parent_id]}, media_body=media,
                 fields="id,name,webViewLink", supportsAllDrives=True).execute()
         except Exception as exc:
-            message = str(exc)
-            if "storageQuotaExceeded" in message or "Service Accounts do not have storage quota" in message:
-                raise MomError(
-                    "MOM-013",
-                    f"Drive upload of {name} failed because the processor is using a service account without My Drive storage quota. "
-                    "Configure GOOGLE_OAUTH_REFRESH_TOKEN and GOOGLE_OAUTH_CLIENT_ID in GitHub Actions, or move the output workspace to a Shared Drive."
-                )
             raise MomError("MOM-013", f"Drive upload of {name} failed: {exc}")
 
     def upsert_text(self, parent_id, name, text, mime="text/plain"):
