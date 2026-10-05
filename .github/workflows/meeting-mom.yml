@@ -138,7 +138,7 @@ jobs:
       WHISPER_THREADS: 4
       AUDIO_FILE_ID: ${{ github.event.client_payload.audio_file_id }}
       STRICT_AUDIO_SELECTION: "true"
-    timeout-minutes: 180
+    timeout-minutes: 360
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -266,68 +266,26 @@ jobs:
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
         run: python processor/scripts/test_drive_connection.py
 
-      - name: Whisper transcription
+      - name: Automatic 10-minute batch processing and final AI synthesis
         env:
+          BATCH_SECONDS: 600
+          AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
+          AI_NUM_CTX: 8192
+          AI_NUM_PREDICT: 1400
+          OLLAMA_MODELS: /home/runner/.ollama/models
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           MEETING_ID: ${{ github.event.client_payload.meeting_id }}
           AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
           MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
+          AUDIO_FILE_ID: ${{ github.event.client_payload.audio_file_id }}
         run: |
-          echo "Processor will download audio and run Whisper."
-          python processor/scripts/process_meeting.py --stage whisper
-
-      - name: English translation
-        env:
-          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
-          MEETING_ID: ${{ github.event.client_payload.meeting_id }}
-          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
-          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
-        run: python processor/scripts/process_meeting.py --stage translation
-
-      - name: AI understanding and evidence extraction
-        env:
-          AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
-          AI_NUM_CTX: 8192
-          AI_NUM_PREDICT: 1400
-          OLLAMA_MODELS: /home/runner/.ollama/models
-          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
-          MEETING_ID: ${{ github.event.client_payload.meeting_id }}
-          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
-          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
-        run: python processor/scripts/process_meeting.py --stage ai
-
-      - name: MoM preparation and validation
-        env:
-          AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
-          AI_NUM_CTX: 8192
-          AI_NUM_PREDICT: 1400
-          OLLAMA_MODELS: /home/runner/.ollama/models
-          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
-          MEETING_ID: ${{ github.event.client_payload.meeting_id }}
-          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
-          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
-        run: python processor/scripts/process_meeting.py --stage mom
-
-      - name: Record failure status
-        if: failure()
-        env:
-          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
-          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
-          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
-          MEETING_ID: ${{ github.event.client_payload.meeting_id }}
-          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
-          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
-          FAILED_STEP: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          FAILED_ERROR_CODE: MOM-003
-        run: python processor/scripts/process_meeting.py --stage fail
+          echo "Long meeting mode: automatic 10-minute batches."
+          echo "The browser uploads the complete recording once."
+          echo "The processor splits it, preserves original-language transcript, creates English translation,"
+          echo "runs evidence extraction per batch, then synthesizes one complete summary and one MoM."
+          python processor/scripts/process_meeting.py --stage batch
 
       - name: Verify local output contract
         run: |
