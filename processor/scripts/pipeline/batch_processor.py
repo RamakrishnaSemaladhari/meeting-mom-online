@@ -55,6 +55,32 @@ def _build_bilingual_docx(path, title, original, translation):
             doc.add_paragraph(f"[{fmt_ts(seg['start'])} - {fmt_ts(seg['end'])}] ENGLISH: [No aligned translation]")
     doc.save(path)
 
+def _parse_ai_timestamp(value):
+    import re
+    nums = [int(x) for x in re.findall(r"\\d+", str(value or ""))]
+    if len(nums) >= 3:
+        if len(nums) >= 6:
+            return nums[0]*3600 + nums[1]*60 + nums[2], nums[3]*3600 + nums[4]*60 + nums[5]
+        return nums[0]*3600 + nums[1]*60 + nums[2], None
+    return None, None
+
+def _translation_from_ai(items, original, offset):
+    out = []
+    for item in items or []:
+        start, end = _parse_ai_timestamp(item.get("timestamp"))
+        text = str(item.get("text") or "").strip()
+        if start is None or not text:
+            continue
+        if end is None:
+            end = start + 1.0
+        # AI timestamps are relative to the batch; restore full-meeting time.
+        out.append({"start": round(start + offset, 2), "end": round(end + offset, 2), "text": text})
+    if not out:
+        return []
+    # Keep only translations that overlap the original speech window.
+    lo, hi = original[0]["start"], original[-1]["end"]
+    return [x for x in out if hi >= x["start"] >= lo - 2.0 or x["end"] >= lo and x["start"] <= hi + 2.0]
+
 def _shift_whisper_data(data, offset):
     out = dict(data)
     rows = []
