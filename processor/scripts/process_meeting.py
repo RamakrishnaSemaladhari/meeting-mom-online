@@ -381,7 +381,21 @@ def stage_fail(ctx):
                     f"Workflow step failed before the processor could report: {env('FAILED_STEP', 'unknown')}")
 
 
-from pipeline.batch_processor import stage_batch\n\nSTAGES = {"init": stage_init, "whisper": stage_whisper, "translation": stage_translation,\n          "ai": stage_ai, "mom": stage_mom, "batch": stage_batch, "fail": stage_fail}\n\n\ndef main():
+from pipeline.batch_processor import stage_batch as _stage_batch
+
+def stage_batch(ctx):
+    return _stage_batch(ctx, {
+        "env": env, "load_metadata": load_metadata, "select_audio": select_audio,
+        "fmt_ts": ai_mod.fmt_ts, "run_cmd": run_cmd, "transcribe_with_gate": transcribe_with_gate,
+        "whisper_json": whisper_json, "detected_language": detected_language,
+        "language_hint": language_hint, "timestamped_text": timestamped_text,
+        "publish_ai_outputs": publish_ai_outputs, "WORK": WORK, "DOCX_MIME": DOCX_MIME,
+        "JSON_MIME": JSON_MIME, "dump": dump, "now": now, "log": log,
+        "WHISPER_MODEL": WHISPER_MODEL
+    })
+
+STAGES = {"init": stage_init, "whisper": stage_whisper, "translation": stage_translation,
+          "ai": stage_ai, "mom": stage_mom, "batch": stage_batch, "fail": stage_fail}\n\n\ndef main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=list(STAGES) + ["all"], default="all")
     args = parser.parse_args()
