@@ -1,0 +1,90 @@
+name: AI Recovery / Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      meeting_id:
+        description: "Existing meeting folder / meeting ID"
+        required: true
+        type: string
+      audio_folder_id:
+        description: "Existing audio folder ID"
+        required: true
+        type: string
+      meeting_folder_id:
+        description: "Existing meeting folder ID"
+        required: true
+        type: string
+      ai_model:
+        description: "AI model to benchmark"
+        required: true
+        default: "qwen3:4b-instruct-2507-q4_K_M"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  recover-ai:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AI_MODEL: ${{ inputs.ai_model }}
+      AI_NUM_CTX: 8192
+      AI_NUM_PREDICT: 1400
+      OLLAMA_MODELS: /home/runner/.ollama/models
+      GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+      GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+      MEETING_ID: ${{ inputs.meeting_id }}
+      AUDIO_FOLDER_ID: ${{ inputs.audio_folder_id }}
+      MEETING_FOLDER_ID: ${{ inputs.meeting_folder_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: processor/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r processor/requirements.txt
+
+      - name: Restore AI model cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama
+          key: ${{ runner.os }}-ollama-${{ inputs.ai_model }}-v1
+
+      - name: Prepare Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          mkdir -p "$OLLAMA_MODELS"
+          ollama serve > /tmp/ollama.log 2>&1 &
+          for i in {1..30}; do
+            if curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then break; fi
+            sleep 2
+          done
+          if ! ollama list | awk 'NR>1 {print $1}' | grep -Fxq "$AI_MODEL"; then
+            ollama pull "$AI_MODEL"
+          fi
+          ollama list
+
+      - name: Verify Google Drive access
+        run: python processor/scripts/test_drive_connection.py
+
+      - name: Recover AI analysis from existing Drive transcript
+        run: python processor/scripts/process_meeting.py --stage ai
+
+      - name: Generate and validate MoM
+        run: python processor/scripts/process_meeting.py --stage mom
+
+      - name: Report outputs
+        run: |
+          echo "AI recovery completed."
+          echo "The source audio was not reprocessed."
+          echo "Transcript.json and Translation.json were read from the existing Drive meeting folder."
