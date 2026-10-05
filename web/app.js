@@ -22,6 +22,9 @@ let recordedChunks = [];
 let isRecording = false;
 let pendingProcessingMeeting = null;
 let backgroundProcessing = JSON.parse(localStorage.getItem("meeting_mom_processing_queue") || "[]");
+let continuitySourceType = "meeting_id";
+let continuityFileText = "";
+let continuityFileName = "";
 
 const $ = id => document.getElementById(id);
 
@@ -231,6 +234,9 @@ function prepareNextMeeting() {
 
   meetingFolders = null;
   audioUploaded = false;
+  continuitySourceType = "meeting_id";
+  continuityFileText = "";
+  continuityFileName = "";
   localStorage.removeItem("meeting_mom_active_meeting");
 
   $("title").value = "";
@@ -254,6 +260,97 @@ function prepareNextMeeting() {
   setAudioControlsBusy(false);
   renderBackgroundProcessing();
   status("READY FOR NEXT MEETING. You can record or upload the next meeting now.", "success");
+}
+
+function setContinuitySource(type) {
+  continuitySourceType = type || "meeting_id";
+  const map = {Id:"meeting_id",File:"mom_file",Summary:"summary"};
+  ["Id","File","Summary"].forEach(function(kind) {
+    const tab = $("continuity" + kind + "Tab");
+    const panel = $("continuity" + kind + "Panel");
+    if (tab) tab.classList.toggle("active", continuitySourceType === map[kind]);
+    if (panel) panel.classList.toggle("hidden", continuitySourceType !== map[kind]);
+  });
+  const badge = $("continuitySourceBadge");
+  if (badge) {
+    badge.textContent = continuitySourceType === "meeting_id"
+      ? ($("continuityMeeting")?.value ? "Meeting ID continuity selected" : "No continuity selected")
+      : continuitySourceType === "mom_file"
+        ? (continuityFileName ? "Previous MoM file: " + continuityFileName : "Previous MoM file not selected")
+        : (($("continuitySummary")?.value || "").trim() ? "Previous summary continuity selected" : "Previous summary not entered");
+  }
+}
+
+async function extractContinuityFile(file) {
+  if (!file) return "";
+  const name = String(file.name || "").toLowerCase();
+  if (name.endsWith(".txt") || name.endsWith(".md")) return file.text();
+
+  if (name.endsWith(".docx")) {
+    const mammoth = await import("https://cdn.jsdelivr.net/npm/mammoth@1.8.0/+esm");
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({arrayBuffer});
+    return result.value || "";
+  }
+
+  if (name.endsWith(".pdf")) {
+    const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/+esm");
+    pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+    const pdf = await pdfjs.getDocument({data: await file.arrayBuffer()}).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      pages.push(content.items.map(x => x.str || "").join(" "));
+    }
+    return pages.join("\n\n");
+  }
+
+  throw new Error("Previous MoM must be DOCX, PDF, TXT or MD.");
+}
+
+async function saveContinuityContext() {
+  if (!meetingFolders?.meeting?.id) throw new Error("Create the new meeting before saving continuity.");
+
+  let text = "";
+  let sourceName = "";
+
+  if (continuitySourceType === "meeting_id") {
+    if (!$("continuityMeeting")?.value) throw new Error("Select a previous meeting first.");
+    sourceName = getSelectedContinuityTitle();
+  } else if (continuitySourceType === "mom_file") {
+    if (!continuityFileText.trim()) throw new Error("Select and load a previous MoM file first.");
+    text = continuityFileText.trim();
+    sourceName = continuityFileName || "Previous MoM";
+  } else {
+    text = ($("continuitySummary")?.value || "").trim();
+    if (!text) throw new Error("Enter or speak a previous meeting summary first.");
+    sourceName = "Previous meeting summary";
+  }
+
+  if (continuitySourceType !== "meeting_id") {
+    const existing = await listDriveFiles(
+      "'" + meetingFolders.meeting.id + "' in parents and name = 'CONTINUITY_PREVIOUS_MOM.txt' and trashed = false",
+      "files(id,name)"
+    );
+    let fileId = existing[0]?.id;
+    if (!fileId) {
+      const r = await driveRequest("https://www.googleapis.com/drive/v3/files", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({name:"CONTINUITY_PREVIOUS_MOM.txt",mimeType:"text/plain",parents:[meetingFolders.meeting.id]})
+      });
+      fileId = (await r.json()).id;
+    }
+    await uploadTextToFile(fileId, text, "text/plain");
+    meetingFolders.continuityFile = {id:fileId,name:"CONTINUITY_PREVIOUS_MOM.txt"};
+  }
+
+  continuityFileName = sourceName;
+  await updateMeetingMetadata();
+  $("continuityStatus").textContent = "Continuity saved: " + sourceName;
+  setContinuitySource(continuitySourceType);
+  status("Previous meeting continuity saved with this new meeting.", "success");
 }
 
 function todayISO() {
@@ -307,7 +404,9 @@ function persistMeetingState() {
     mom: meetingFolders.mom,
     metadata: meetingFolders.metadata,
     audioUploaded: !!audioUploaded,
-    audioFile: meetingFolders.audioFile || null
+    audioFile: meetingFolders.audioFile || null,
+    continuitySourceType,
+    continuityFileName
   };
   localStorage.setItem("meeting_mom_active_meeting", JSON.stringify(state));
 }
@@ -320,6 +419,8 @@ function restoreMeetingState() {
     if (!state?.meeting?.id || !state?.audio?.id) return false;
     meetingFolders = state;
     audioUploaded = !!state.audioUploaded;
+    continuitySourceType = state.continuitySourceType || "meeting_id";
+    continuityFileName = state.continuityFileName || "";
     const box = $("uploadBox");
     if (box) {
       box.classList.remove("hidden");
@@ -523,6 +624,7 @@ function initGoogle() {
       accessToken = response.access_token;
       sessionStorage.setItem("meeting_mom_google_connected","1");
       $("connectBtn").classList.add("hidden");
+      $("appActions")?.classList.remove("hidden");
       $("meetingCard").classList.remove("hidden");
       $("date").value = $("date").value || todayISO();
       renderBackgroundProcessing();
@@ -696,7 +798,11 @@ async function recoverLatestMeeting() {
     if (metadataData.venue) $("venue").value = metadataData.venue;
     if (metadataData.agenda) $("agenda").value = metadataData.agenda;
     if (metadataData.initiator) $("initiator").value = metadataData.initiator;
+    continuitySourceType = metadataData.continuity_source_type || (metadataData.continuity_meeting_id ? "meeting_id" : "meeting_id");
     if (metadataData.continuity_meeting_id) $("continuityMeeting").value = metadataData.continuity_meeting_id;
+    if (metadataData.continuity_summary) $("continuitySummary").value = metadataData.continuity_summary;
+    continuityFileName = metadataData.continuity_file_name || "";
+    setContinuitySource(continuitySourceType);
     if (Array.isArray(metadataData.participants)) {
       $("participants").innerHTML = "";
       metadataData.participants.forEach(p => addParticipant(p));
@@ -775,8 +881,11 @@ async function createMeetingWorkspace() {
     venue: $("venue").value.trim(),
     agenda: $("agenda").value.trim(),
     initiator: $("initiator")?.value.trim() || "",
-    continuity_meeting_id: $("continuityMeeting")?.value || "",
-    continuity_meeting_title: getSelectedContinuityTitle(),
+    continuity_source_type: continuitySourceType,
+    continuity_meeting_id: continuitySourceType === "meeting_id" ? ($("continuityMeeting")?.value || "") : "",
+    continuity_meeting_title: continuitySourceType === "meeting_id" ? getSelectedContinuityTitle() : (continuitySourceType === "mom_file" ? (continuityFileName || "Previous MoM") : "Previous meeting summary"),
+    continuity_file_name: continuityFileName || "",
+    continuity_summary: continuitySourceType === "summary" ? ($("continuitySummary")?.value || "").trim() : "",
     participants: collectParticipants(),
     created_at: new Date().toISOString()
   };
@@ -822,8 +931,11 @@ async function updateMeetingMetadata() {
     venue: $("venue").value.trim(),
     agenda: $("agenda").value.trim(),
     initiator: $("initiator")?.value.trim() || "",
-    continuity_meeting_id: $("continuityMeeting")?.value || "",
-    continuity_meeting_title: getSelectedContinuityTitle(),
+    continuity_source_type: continuitySourceType,
+    continuity_meeting_id: continuitySourceType === "meeting_id" ? ($("continuityMeeting")?.value || "") : "",
+    continuity_meeting_title: continuitySourceType === "meeting_id" ? getSelectedContinuityTitle() : (continuitySourceType === "mom_file" ? (continuityFileName || "Previous MoM") : "Previous meeting summary"),
+    continuity_file_name: continuityFileName || "",
+    continuity_summary: continuitySourceType === "summary" ? ($("continuitySummary")?.value || "").trim() : "",
     participants: collectParticipants(),
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
@@ -1802,6 +1914,46 @@ function getSelectedContinuityTitle() {
   const select=$("continuityMeeting"); if(!select?.value)return "";
   return select.options[select.selectedIndex]?.textContent.replace(/^.*?—\s*/,"").trim()||"";
 }
+function loadContinuityMeeting() {
+  if (continuitySourceType === "mom_file" || continuitySourceType === "summary") {
+    saveContinuityContext().catch(e=>status(e.message,"error"));
+    return;
+  }
+  const id=$("continuityMeeting")?.value;
+  if(!id){clearContinuityMeeting();return;}
+  (async function(){
+    try {
+      const files=await listDriveFiles("'" + id + "' in parents and name = 'meeting_metadata.json' and trashed = false","files(id,name)");
+      if(files.length){
+        const r=await driveRequest("https://www.googleapis.com/drive/v3/files/"+encodeURIComponent(files[0].id)+"?alt=media");
+        const m=await r.json();
+        if(m.title) $("title").value=m.title+" — Continuation";
+        if(m.venue) $("venue").value=m.venue;
+        if(m.agenda) $("agenda").value=m.agenda;
+        if(m.initiator) $("initiator").value=m.initiator;
+        if(Array.isArray(m.participants)){$("participants").innerHTML="";m.participants.forEach(p=>addParticipant(p));}
+        updateFilenamePreview();
+      }
+      await updateMeetingMetadata();
+      $("continuityStatus").textContent="Previous meeting details loaded. The new recording/upload remains separate.";
+      setContinuitySource("meeting_id");
+      status("Previous meeting details loaded. New meeting audio will be stored separately.","success");
+    }catch(e){$("continuityStatus").textContent=e.message;status(e.message,"error");}
+  })();
+}
+function clearContinuityMeeting() {
+  continuitySourceType = "meeting_id";
+  continuityFileText = "";
+  continuityFileName = "";
+  if ($("continuityMeeting")) $("continuityMeeting").value="";
+  if ($("continuitySummary")) $("continuitySummary").value="";
+  if ($("continuityFile")) $("continuityFile").value="";
+  if ($("continuityFileStatus")) $("continuityFileStatus").textContent="Upload the previous MoM. Its text will be extracted and stored privately with this meeting as continuity evidence.";
+  if ($("continuityStatus")) $("continuityStatus").textContent="Continuity cleared. This meeting will be treated as a new meeting.";
+  setContinuitySource("meeting_id");
+  updateMeetingMetadata().catch(()=>{});
+}
+
 function renderAttendance(data) {
   const rows=Array.isArray(data?.participants)?data.participants:[];
   const present=rows.filter(x=>String(x.status||"PRESENT").toUpperCase()==="PRESENT");
@@ -1924,6 +2076,28 @@ document.addEventListener("DOMContentLoaded",function(){
   startFieldVoice($("venueVoice"),$("venue"));
   $("loadContinuityBtn")?.addEventListener("click",loadContinuityMeeting);
   $("clearContinuityBtn")?.addEventListener("click",clearContinuityMeeting);
+  $("continuityIdTab")?.addEventListener("click",()=>setContinuitySource("meeting_id"));
+  $("continuityFileTab")?.addEventListener("click",()=>setContinuitySource("mom_file"));
+  $("continuitySummaryTab")?.addEventListener("click",()=>setContinuitySource("summary"));
+  $("continuityMeeting")?.addEventListener("change",()=>setContinuitySource("meeting_id"));
+  $("continuitySummaryVoice") && startFieldVoice($("continuitySummaryVoice"),$("continuitySummary"));
+  $("continuitySummary")?.addEventListener("input",()=>{continuitySourceType="summary";setContinuitySource("summary");});
+  $("continuityFile")?.addEventListener("change",async function(){
+    const file=this.files?.[0]; if(!file)return;
+    try {
+      continuityFileText=await extractContinuityFile(file);
+      continuityFileName=file.name;
+      continuitySourceType="mom_file";
+      $("continuityFileStatus").textContent="Extracted " + continuityFileText.length.toLocaleString() + " characters from " + file.name + ". Press LOAD CONTINUITY.";
+      setContinuitySource("mom_file");
+    } catch(e) {
+      continuityFileText=""; continuityFileName="";
+      $("continuityFileStatus").textContent=e.message;
+      status("Previous MoM extraction failed: "+e.message,"error");
+    }
+  });
+  $("newMeetingBtn")?.addEventListener("click",prepareNextMeeting);
+  $("homeMeetingBtn")?.addEventListener("click",function(){window.scrollTo({top:0,behavior:"smooth"});});
   $("refreshAttendanceBtn")?.addEventListener("click",async function(){try{await readAttendanceManifest();}catch(e){status("Attendance refresh failed: "+e.message,"error");}});
   $("importAttendanceBtn")?.addEventListener("click",function(){$("attendanceJsonFile")?.click();});
   $("attendanceJsonFile")?.addEventListener("change",function(){importAttendanceJson(this.files?.[0]);});
