@@ -45,6 +45,9 @@ CHUNK_SCHEMA = {
         "open_questions": {"type": "array", "items": {"type": "string"}},
         "next_meeting": {"type": "array", "items": {"type": "string"}},
         "review_flags": {"type": "array", "items": {"type": "string"}},
+        "translation": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["timestamp", "text"],
+            "properties": {"timestamp": {"type": "string"}, "text": {"type": "string"}}}},
     },
 }
 
@@ -118,6 +121,8 @@ def _post(model, messages, as_json, temperature, timeout=900, schema=None, num_p
             "num_predict": int(num_predict or os.environ.get("AI_NUM_PREDICT", "1400")),
         },
     }
+    if "qwen3:1.7b" in model or "qwen3" in model:
+        body["think"] = False
     if as_json:
         # Ollama structured outputs accept a JSON schema in format; this constrains
         # generation instead of asking the model to obey JSON formatting by prompt alone.
@@ -202,6 +207,10 @@ def normalize_chunk(obj):
     obj = obj if isinstance(obj, dict) else {}
     return {
         "section_summary": _s(obj.get("section_summary") or obj.get("summary")),
+        "translation": [
+            {"timestamp": _s(x.get("timestamp")), "text": _s(x.get("text"))}
+            for x in (obj.get("translation") or []) if isinstance(x, dict) and _s(x.get("text"))
+        ],
         "discussion_points": _str_list(obj.get("discussion_points")),
         "decisions": _items(obj.get("decisions"), "decision", False),
         "action_items": _items(obj.get("action_items"), "action", True),
@@ -273,7 +282,7 @@ ORIGINAL TRANSCRIPT (timestamped):
 {chr(10).join(seg_line(s) for s in chunk)}
 {translation}
 Return ONLY valid JSON with exactly these keys:
-section_summary, discussion_points, decisions, action_items, commitments, open_questions, next_meeting, review_flags
+section_summary, discussion_points, decisions, action_items, commitments, open_questions, next_meeting, review_flags, translation
 
 section_summary: a detailed chronological account (6-12 sentences) of what was discussed in THIS section: topics, explanations, concerns, alternatives, changes in direction, conclusions, unresolved matters.
 discussion_points: array of short strings.
@@ -281,6 +290,7 @@ decisions: objects with keys decision, timestamp, evidence.
 action_items: objects with keys action, owner, deadline, timestamp, evidence.
 commitments: objects with keys commitment, owner, deadline, timestamp, evidence.
 open_questions, next_meeting, review_flags: arrays of strings.
+translation: timestamped English translation of the ORIGINAL TRANSCRIPT for this section. If the original is already English, copy the original text. Preserve meaning; do not summarize or omit content.
 
 {RULES}"""
 
