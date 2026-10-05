@@ -24,6 +24,30 @@ OUTPUT_KEYS = ["executive_summary", "complete_conversation_summary", "discussion
                "decisions", "action_items", "commitments", "open_questions",
                "next_meeting", "review_flags"]
 
+# JSON schema supplied directly to Ollama. This is stronger than JSON-mode alone:
+# the model is constrained to the exact evidence-extraction shape before generation.
+CHUNK_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": CHUNK_KEYS,
+    "properties": {
+        "section_summary": {"type": "string"},
+        "discussion_points": {"type": "array", "items": {"type": "string"}},
+        "decisions": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["decision", "timestamp", "evidence"],
+            "properties": {"decision": {"type": "string"}, "timestamp": {"type": "string"}, "evidence": {"type": "string"}}}},
+        "action_items": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["action", "owner", "deadline", "timestamp", "evidence"],
+            "properties": {"action": {"type": "string"}, "owner": {"type": "string"}, "deadline": {"type": "string"}, "timestamp": {"type": "string"}, "evidence": {"type": "string"}}}},
+        "commitments": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["commitment", "owner", "deadline", "timestamp", "evidence"],
+            "properties": {"commitment": {"type": "string"}, "owner": {"type": "string"}, "deadline": {"type": "string"}, "timestamp": {"type": "string"}, "evidence": {"type": "string"}}}},
+        "open_questions": {"type": "array", "items": {"type": "string"}},
+        "next_meeting": {"type": "array", "items": {"type": "string"}},
+        "review_flags": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
 _EMPTY_OWNER = {"", "none", "n/a", "na", "unknown", "unassigned", "not specified", "not stated", "null"}
 
 
@@ -85,17 +109,19 @@ def translation_for_chunk(chunk, translation_segments):
     return [seg_line(t) for t in picked]
 
 
-def _post(model, messages, as_json, temperature, timeout=900):
+def _post(model, messages, as_json, temperature, timeout=900, schema=None, num_predict=None):
     body = {
         "model": model, "stream": False, "messages": messages,
         "options": {
             "temperature": temperature,
             "num_ctx": int(os.environ.get("AI_NUM_CTX", "8192")),
-            "num_predict": int(os.environ.get("AI_NUM_PREDICT", "1800")),
+            "num_predict": int(num_predict or os.environ.get("AI_NUM_PREDICT", "1400")),
         },
     }
     if as_json:
-        body["format"] = "json"
+        # Ollama structured outputs accept a JSON schema in format; this constrains
+        # generation instead of asking the model to obey JSON formatting by prompt alone.
+        body["format"] = schema or "json"
     req = urllib.request.Request(OLLAMA_URL, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
@@ -110,21 +136,22 @@ def _post(model, messages, as_json, temperature, timeout=900):
 
 
 def make_ollama_fns(model):
-    def json_fn(prompt):
+    def json_fn(prompt, schema=None):
         messages = [
-            {"role": "system", "content": "Return strict JSON only. No markdown and no commentary."},
+            {"role": "system", "content": "Return only the requested structured data. Never invent facts."},
             {"role": "user", "content": prompt}]
-        content = _post(model, messages, True, 0.1)
+        # First attempt uses schema-constrained decoding. If parsing still fails, retry
+        # once with the same schema at temperature 0 rather than asking the model to
+        # repair its own prose output.
+        content = _post(model, messages, True, 0.0, schema=schema)
         try:
             return json.loads(content)
         except ValueError:
-            repair = ("Convert the following model output into valid JSON without changing its "
-                      "factual content or inventing anything. Return JSON only.\n\n" + content)
-            fixed = _post(model, [{"role": "user", "content": repair}], True, 0)
+            fixed = _post(model, messages, True, 0.0, schema=schema)
             try:
                 return json.loads(fixed)
             except ValueError:
-                raise MomError("MOM-010", "The AI model returned JSON that could not be parsed.")
+                raise MomError("MOM-010", "The AI model returned JSON that could not be parsed after schema-constrained retry.")
 
     def text_fn(prompt):
         messages = [
@@ -302,7 +329,7 @@ Open questions and review flags:
 
 
 def run_understanding(metadata, original_segments, translation_segments, json_fn, text_fn,
-                      max_chars=6000, progress=None, model=""):
+                      max_chars=8000, progress=None, model=""):
     if not original_segments:
         raise MomError("MOM-010", "Whisper produced no timestamped transcript segments.")
     chunks = chunk_segments(original_segments, max_chars)
@@ -311,7 +338,7 @@ def run_understanding(metadata, original_segments, translation_segments, json_fn
         if progress:
             progress("ANALYZING", f"Evidence extraction {i}/{len(chunks)}", 60 + int(15 * (i - 1) / len(chunks)))
         raw = json_fn(chunk_prompt(metadata, i, len(chunks), chunk,
-                                   translation_for_chunk(chunk, translation_segments)))
+                                   translation_for_chunk(chunk, translation_segments)), CHUNK_SCHEMA)
         sections.append(normalize_chunk(raw))
 
     merged = merge_sections(sections)
