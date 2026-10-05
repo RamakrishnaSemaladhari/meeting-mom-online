@@ -263,8 +263,37 @@ RULES = """Rules:
 
 
 def _meta_for_prompt(metadata):
-    keep = ["title", "date", "start_time", "end_time", "venue", "mode", "agenda", "participants"]
+    keep = ["title", "meeting_type", "meeting_subtype", "date", "start_time", "end_time", "venue", "mode", "agenda", "learning_context", "case_reference", "legal_objective", "drafting_instruction", "session_notes", "participants"]
     return json.dumps({k: metadata.get(k) for k in keep if metadata.get(k)}, ensure_ascii=False, indent=1)
+
+
+def _type_guidance(metadata):
+    meeting_type = str(metadata.get("meeting_type") or "meeting_mom")
+    subtype = str(metadata.get("meeting_subtype") or "general")
+    if meeting_type == "legal_stage_1_analysis":
+        return ("Legal Stage 1: separate transcript facts from legal analysis. Extract stated facts, issues, "
+                "possible provisions/charges only when actually discussed, arguments, risks and unresolved questions. "
+                "Do not present a legal conclusion that was not stated in the discussion.")
+    if meeting_type == "legal_stage_2_verification":
+        return ("Legal Stage 2: treat uploaded reference documents as separate evidence when available. "
+                "Identify document-versus-discussion discrepancies and mark every unverified point for review. "
+                "Do not silently resolve conflicts.")
+    if meeting_type == "legal_stage_3_drafting":
+        return ("Legal Stage 3: capture the exact drafting objective, document requested, material clauses/facts, "
+                "instructions, approvals and unresolved drafting points. Do not invent legal text or authorities.")
+    if meeting_type == "legal_client_case":
+        return ("Legal client/case discussion: preserve client-stated facts, issues, instructions, commitments and "
+                "follow-ups separately from legal analysis. Mark uncertain or disputed facts for review.")
+    if meeting_type == "lecture_learning":
+        return ("Lecture/learning mode: emphasize concepts taught, explanations, examples, questions, takeaways, "
+                "learning gaps and follow-up study items. Do not turn examples into factual claims about the learner.")
+    if meeting_type == "notes":
+        return ("Notes mode: produce a faithful structured record of the supplied conversation/notes, preserving "
+                "important observations and uncertainty rather than forcing a formal MoM.")
+    if meeting_type == "continuity_comparison":
+        return ("Continuity/comparison mode: distinguish current-session evidence from prior documents or prior MoM. "
+                "Highlight changes, unresolved carry-forward items and explicit confirmations.")
+    return f"Meeting type: {meeting_type}; subtype: {subtype}. Structure the output according to the stated purpose while preserving the evidence-first rules."
 
 
 def chunk_prompt(metadata, index, total, chunk, translation_lines):
@@ -277,6 +306,9 @@ This is section {index} of {total} of ONE meeting, covering {fmt_ts(chunk[0]['st
 
 Meeting metadata (context only):
 {_meta_for_prompt(metadata)}
+
+Type-specific processing guidance:
+{_type_guidance(metadata)}
 
 ORIGINAL TRANSCRIPT (timestamped):
 {chr(10).join(seg_line(s) for s in chunk)}
@@ -309,6 +341,9 @@ The result must be a coherent account of the entire conversation, written as sev
 Meeting metadata (context only):
 {_meta_for_prompt(metadata)}
 
+Type-specific processing guidance:
+{_type_guidance(metadata)}
+
 Chronological section summaries (each derived directly from the transcript):
 {numbered}"""
 
@@ -324,6 +359,9 @@ Use ONLY the information below. Do not invent anything. If a category has nothin
 
 Meeting metadata (context only):
 {_meta_for_prompt(metadata)}
+
+Type-specific processing guidance:
+{_type_guidance(metadata)}
 
 Complete conversation summary:
 {complete_summary}
