@@ -1,4 +1,4 @@
-"""Offline tests: no Drive, Whisper or Ollama needed.  Run from the repo root:
+"""Offline tests: no Drive, Whisper or Ollama needed. Fast-path regression coverage. Run from the repo root:
     python -m unittest discover -s processor/tests -v
 """
 import json
