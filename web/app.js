@@ -1394,17 +1394,74 @@ async function findAndMonitorLatestRun(item,requestStarted) {
 async function monitorWorkflowRun(item) {
   if (!item || !item.runId) return;
   try {
-    const r=await fetch("https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs/"+item.runId+"/jobs",{headers:{"Accept":"application/vnd.github+json"}});
-    if (!r.ok) throw new Error("Workflow status unavailable.");
-    const data=await r.json();
-    const job=(data.jobs||[])[0];
+    const runResponse = await fetch(
+      "https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs/" + item.runId,
+      {headers:{"Accept":"application/vnd.github+json"}}
+    );
+    if (!runResponse.ok) throw new Error("Workflow status unavailable.");
+    const run = await runResponse.json();
 
-    // Older test runs used a bootstrap-only job. They must never be treated
-    // as successful meeting processing.
+    const jobsResponse = await fetch(
+      "https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs/" + item.runId + "/jobs",
+      {headers:{"Accept":"application/vnd.github+json"}}
+    );
+    if (!jobsResponse.ok) throw new Error("Workflow job status unavailable.");
+    const jobsData = await jobsResponse.json();
+    const jobs = jobsData.jobs || [];
+
+    // A repository-dispatch run is successful only when the complete workflow succeeds.
+    if (run.status === "completed" && run.conclusion !== "success") {
+      updateBackgroundProcessing(item.id, {
+        stage: "failed",
+        statusText: "Processing failed"
+      });
+      if (meetingFolders?.meeting?.id === item.id) {
+        ensureRetryButton();
+        if (retryButton) {
+          retryButton.classList.remove("hidden");
+          retryButton.disabled = false;
+          retryButton.textContent = "RETRY PROCESSING";
+        }
+        if ($("uploadText")) {
+          $("uploadText").textContent =
+            "Processing failed. The existing audio is still available. Retry without uploading it again.";
+        }
+        if ($("processingSummaryHint")) {
+          $("processingSummaryHint").textContent =
+            "Processing stopped before final completion. Existing audio remains available for retry.";
+        }
+      }
+      return;
+    }
+
+    if (run.status === "completed" && run.conclusion === "success") {
+      updateBackgroundProcessing(item.id, {
+        stage: "complete",
+        percent: 100,
+        statusText: "Results ready"
+      });
+      if (meetingFolders?.meeting?.id === item.id) {
+        if (retryButton) retryButton.classList.add("hidden");
+        if ($("uploadText")) $("uploadText").textContent =
+          "Processing complete. Existing audio was not uploaded again.";
+        if ($("processingSummaryHint")) $("processingSummaryHint").textContent =
+          "Final MoM, transcript, translation and evidence are ready in the meeting workspace.";
+      }
+      await loadMeetingResults(item);
+      return;
+    }
+
+    const activeJobs = jobs.filter(j => j.status === "in_progress" || j.status === "queued");
+    const job = activeJobs[0] ||
+      jobs.find(j => /^finalize/.test(j.name)) ||
+      jobs.find(j => /^parallel-batches/.test(j.name)) ||
+      jobs.find(j => j.name === "prepare") ||
+      jobs[0];
+
     if (job && job.name === "bootstrap") {
-      updateBackgroundProcessing(item.id,{
-        stage:"failed",
-        statusText:"Previous test run did not process the meeting audio."
+      updateBackgroundProcessing(item.id, {
+        stage: "failed",
+        statusText: "Previous test run did not process the meeting audio."
       });
       if (meetingFolders?.meeting?.id === item.id) {
         ensureRetryButton();
@@ -1413,10 +1470,6 @@ async function monitorWorkflowRun(item) {
           retryButton.disabled = false;
           retryButton.textContent = "START PROCESSING";
         }
-        if ($("uploadText")) {
-          $("uploadText").textContent =
-            "Audio is already stored. The earlier test run was only a connectivity/bootstrap test.";
-        }
         showRecoveredProcessingUI(
           "Audio is ready. The earlier GitHub run was a test only; actual processing has not started."
         );
@@ -1424,46 +1477,52 @@ async function monitorWorkflowRun(item) {
       return;
     }
 
-    const steps=job && job.steps ? job.steps : [];
-    const stages=[
-      {key:"checking",name:"Validate meeting request",pct:8,label:"Checking meeting and processor access"},
-      {key:"upload",name:"Initialize processing status",pct:12,label:"Meeting audio confirmed in Google Drive"},
-      {key:"split",name:"Discover duration and dynamic matrix",pct:18,label:"Preparing automatic 10-minute batches"},
-      {key:"parallel",name:"Process batch",pct:55,label:"Parallel Whisper + AI processing of batches"},
-      {key:"ai",name:"Final synthesis and MoM",pct:84,label:"Compiling all batch evidence with final AI"},
-      {key:"mom",name:"Final synthesis and MoM",pct:94,label:"Validating evidence and building the final MoM"},
-      {key:"complete",name:"Results ready",pct:100,label:"Results ready"}
-    ];
-    let current=stages[0];
-    for (const st of stages) {
-      const step=steps.find(function(x){return x.name===st.name;});
-      if (step && step.status==="in_progress") {current=st;break;}
-      if (step && step.conclusion==="success") current=st;
-    }
-    if (job && (job.conclusion==="failure" || job.conclusion==="cancelled")) {
-      updateBackgroundProcessing(item.id,{stage:"failed",statusText:"Processing failed"});
-      if (meetingFolders?.meeting?.id === item.id) {
-        ensureRetryButton();
-        if (retryButton) {
-          retryButton.classList.remove("hidden");
-          retryButton.disabled = false;
-          retryButton.textContent = "RETRY PROCESSING";
-        }
-        if ($("uploadText")) $("uploadText").textContent = "Processing failed. The existing audio is still available. Retry only if you want to run it again.";
+    const steps = job?.steps || [];
+    const step = name => steps.find(x => x.name === name);
+    let current = {
+      key: "checking",
+      pct: 8,
+      label: "Checking meeting and processor access"
+    };
+
+    if (/^prepare/.test(job?.name || "")) {
+      if (step("Discover duration and dynamic matrix")?.status === "in_progress") {
+        current = {key:"split",pct:18,label:"Preparing automatic 10-minute batches"};
+      } else if (step("Initialize processing status")?.status === "in_progress") {
+        current = {key:"upload",pct:12,label:"Meeting audio confirmed in Google Drive"};
       }
-      return;
-    }
-    if (job && job.status==="completed" && job.conclusion==="success") {
-      updateBackgroundProcessing(item.id,{stage:"complete",percent:100,statusText:"Results ready"});
-      if (meetingFolders?.meeting?.id === item.id) {
-        if (retryButton) retryButton.classList.add("hidden");
-        if ($("uploadText")) $("uploadText").textContent = "Processing complete. Existing audio was not uploaded again.";
+    } else if (/^parallel-batches/.test(job?.name || "")) {
+      current = {key:"parallel",pct:55,label:"Parallel Whisper + AI processing of 10-minute batches"};
+    } else if (/^finalize/.test(job?.name || "")) {
+      if (step("Final synthesis and MoM")?.status === "in_progress") {
+        current = {key:"ai",pct:84,label:"Compiling all batch evidence with final AI"};
+      } else if (step("Start local Ollama")?.status === "in_progress") {
+        current = {key:"ai",pct:82,label:"Starting final AI consolidation"};
+      } else {
+        current = {key:"mom",pct:94,label:"Validating evidence and building the final MoM"};
       }
-      await loadMeetingResults(item); return;
     }
-    updateBackgroundProcessing(item.id,{stage:current.key,percent:current.pct,statusText:current.label});
-    setTimeout(function(){monitorWorkflowRun(item);},12000);
-  } catch(e) { setTimeout(function(){monitorWorkflowRun(item);},20000); }
+
+    updateBackgroundProcessing(item.id, {
+      stage: current.key,
+      percent: current.pct,
+      statusText: current.label
+    });
+
+    if (meetingFolders?.meeting?.id === item.id) {
+      showProcessingUI(
+        current.key,
+        current.pct,
+        current.key === "parallel" ? "Batch progress is shown below" : "In progress…",
+        run.status === "queued" ? "Waiting for processor to start" : "Updating…"
+      );
+      if ($("processingStageText")) $("processingStageText").textContent = current.label;
+    }
+
+    setTimeout(function(){ monitorWorkflowRun(item); }, 12000);
+  } catch(e) {
+    setTimeout(function(){ monitorWorkflowRun(item); }, 20000);
+  }
 }
 
 let currentResultItem = null;
