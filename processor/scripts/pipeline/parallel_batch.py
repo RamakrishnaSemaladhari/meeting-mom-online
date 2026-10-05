@@ -220,7 +220,7 @@ def stage_worker():
         if lang == "en":
             translation = [dict(s) for s in original]
         else:
-            translation = _translation_from_ai(ai.get("translation_segments", []), original, start)
+            translation = _translation_from_ai(ai.get("translation_segments", []), original, 0)
             if not translation:
                 ai["review_flags"].append("AI translation was not aligned; review the original transcript.")
 
