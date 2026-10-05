@@ -166,7 +166,7 @@ class Normalisation(unittest.TestCase):
 def fake_llm():
     calls = {"json": [], "text": []}
 
-    def json_fn(prompt):
+    def json_fn(prompt, schema=None):
         calls["json"].append(prompt)
         n = len(calls["json"])
         return {
