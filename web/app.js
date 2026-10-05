@@ -31,13 +31,13 @@ function status(message, kind="") {
   el.className = "status " + kind;
 }
 
-const PROCESS_STAGES = ["checking","upload","whisper","translation","ai","mom","complete"];
+const PROCESS_STAGES = ["checking","upload","split","parallel","ai","mom","complete"];
 const PROCESS_LABELS = {
   checking: "Checking your existing meeting and audio",
-  upload: "Uploading audio to Google Drive",
-  whisper: "Whisper transcription",
-  translation: "English translation",
-  ai: "AI understanding & evidence extraction",
+  upload: "Audio confirmed in Google Drive",
+  split: "Splitting long meeting into 10-minute batches",
+  parallel: "Parallel Whisper + AI processing of batches",
+  ai: "AI consolidation & evidence validation",
   mom: "MoM preparation & validation",
   complete: "Results ready"
 };
@@ -883,7 +883,7 @@ async function uploadAudio(file) {
       audioUploaded = true;
       persistMeetingState();
       ensureRetryButton();
-      status("Meeting audio uploaded successfully. You can now prepare the next meeting.", "success");
+      status("Meeting audio is safely stored. Processing will run in the background; you can prepare the next meeting.", "success");
       return uploaded;
     } else {
       throw new Error("Audio upload failed ("+response.status+").");
@@ -944,6 +944,7 @@ async function startMeeting() {
       throw new Error("This browser does not support microphone recording. Use Chrome or Edge on HTTPS.");
     }
     await createMeetingWorkspace();
+    await updateMeetingMetadata();
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -1054,7 +1055,7 @@ async function stopMeeting() {
 
     try {
       await notifyProcessingStarted(completedMeeting);
-      addBackgroundProcessing(completedMeeting, "Processing started");
+      addBackgroundProcessing(completedMeeting, "Processing request queued — background processing");
       pendingProcessingMeeting = null;
       status("Meeting 1 is queued for processing. READY FOR NEXT MEETING.", "success");
     } catch (triggerErr) {
@@ -1160,11 +1161,55 @@ function driveStageToUi(stage) {
   const s = String(stage || "").toUpperCase();
   if (s === "COMPLETED") return "complete";
   if (s === "FAILED") return "checking";
-  if (s === "ANALYZING" || s === "SUMMARIZING") return "ai";
+  if (s === "ANALYZING") return "parallel";
+  if (s === "SUMMARIZING") return "ai";
   if (s === "GENERATING_MOM" || s === "UPLOADING") return "mom";
-  if (s === "TRANSLATING") return "translation";
-  if (s === "TRANSCRIBING" || s === "CONVERTING") return "whisper";
+  if (s === "TRANSLATING") return "parallel";
+  if (s === "TRANSCRIBING" || s === "CONVERTING" || s === "DOWNLOADING") return "parallel";
   return "checking";
+}
+
+async function readParallelBatchProgress(item) {
+  if (!item?.meetingFolderId || !accessToken) return null;
+  try {
+    const meetingChildren = await listDriveFiles(
+      "'" + item.meetingFolderId + "' in parents and name = 'BATCHES' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+      "files(id,name)"
+    );
+    if (!meetingChildren.length) return null;
+
+    const batchFolders = await listDriveFiles(
+      "'" + meetingChildren[0].id + "' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+      "files(id,name)"
+    );
+    if (!batchFolders.length) return null;
+
+    let completed = 0;
+    let failed = 0;
+    let active = 0;
+    for (const folder of batchFolders) {
+      const files = await listDriveFiles(
+        "'" + folder.id + "' in parents and name contains 'BATCH_STATUS_' and trashed = false",
+        "files(id,name)"
+      );
+      if (!files.length) continue;
+      try {
+        const r = await driveRequest("https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(files[0].id) + "?alt=media");
+        const data = await r.json();
+        const state = String(data.status || "").toUpperCase();
+        if (state === "COMPLETED") completed++;
+        else if (state === "FAILED") failed++;
+        else active++;
+      } catch (_) {}
+    }
+
+    const total = batchFolders.length;
+    if (!total) return null;
+    const percent = Math.max(18, Math.min(82, 18 + Math.round((completed / total) * 64)));
+    return {total, completed, failed, active, percent};
+  } catch (_) {
+    return null;
+  }
 }
 
 async function monitorDriveProcessingStatus(item) {
@@ -1209,7 +1254,55 @@ async function monitorDriveProcessingStatus(item) {
       }
     }
   }
+
+  const batchProgress = await readParallelBatchProgress(item);
+  if (batchProgress && item.stage !== "complete" && item.stage !== "failed") {
+    const label = batchProgress.failed
+      ? "Parallel batches: " + batchProgress.completed + "/" + batchProgress.total + " complete; " + batchProgress.failed + " failed"
+      : "Parallel batches: " + batchProgress.completed + "/" + batchProgress.total + " complete";
+    updateBackgroundProcessing(item.id, {
+      percent: batchProgress.percent,
+      stage: batchProgress.completed === batchProgress.total ? "ai" : "parallel",
+      statusText: label
+    });
+    if (meetingFolders?.meeting?.id === item.id) {
+      showProcessingUI(
+        batchProgress.completed === batchProgress.total ? "ai" : "parallel",
+        batchProgress.percent,
+        batchProgress.failed ? "Review failed batch status" : (batchProgress.total - batchProgress.completed) + " batch(es) remaining",
+        "Parallel processing: " + batchProgress.completed + "/" + batchProgress.total + " batches complete"
+      );
+      if ($("processingStageText")) $("processingStageText").textContent = label;
+      if ($("processingSummaryHint")) $("processingSummaryHint").textContent =
+        "Each 10-minute batch is processed independently. Final AI consolidation starts after all batches complete.";
+    }
+  }
+
   setTimeout(function(){ monitorDriveProcessingStatus(item); }, 4000);
+}
+
+async function resolveProcessingSnapshot(snapshot) {
+  if (!snapshot?.meeting?.id || !snapshot?.audio?.id) {
+    throw new Error("Meeting workspace is incomplete. Please start/prepare the meeting again.");
+  }
+
+  let audioFile = snapshot.audioFile || null;
+  if (!audioFile?.id) {
+    const files = await listDriveFiles(
+      "'" + snapshot.audio.id + "' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'",
+      "files(id,name,mimeType,size,createdTime,modifiedTime,webViewLink)"
+    );
+    if (files.length === 1) {
+      audioFile = files[0];
+    } else if (files.length > 1) {
+      throw new Error("More than one audio file is present. Select the exact meeting recording before processing.");
+    } else {
+      throw new Error("No audio file is present in the meeting AUDIO folder.");
+    }
+  }
+
+  if (!audioFile.id) throw new Error("AUDIO_FILE_ID could not be resolved.");
+  return Object.assign({}, snapshot, {audioFile});
 }
 
 async function notifyProcessingStarted(snapshot, options) {
@@ -1219,6 +1312,7 @@ async function notifyProcessingStarted(snapshot, options) {
     throw new Error("Meeting workspace information is missing.");
   }
 
+  snapshot = await resolveProcessingSnapshot(snapshot);
   const requestStarted = new Date().toISOString();
 
   // Show the live timeline immediately, including when this is a background retry.
@@ -1249,7 +1343,7 @@ async function notifyProcessingStarted(snapshot, options) {
         meeting_id: snapshot.meeting.id,
         meeting_folder_id: snapshot.meeting.id,
         audio_folder_id: snapshot.audio.id,
-        audio_file_id: snapshot.audioFile ? snapshot.audioFile.id : "",
+        audio_file_id: snapshot.audioFile.id,
         metadata_file_id: snapshot.metadata ? snapshot.metadata.id : ""
       })
     });
@@ -1332,11 +1426,12 @@ async function monitorWorkflowRun(item) {
 
     const steps=job && job.steps ? job.steps : [];
     const stages=[
-      {key:"checking",name:"Validate meeting request",pct:10,label:"Checking meeting and processor access"},
-      {key:"whisper",name:"Whisper transcription",pct:30,label:"Whisper transcription"},
-      {key:"translation",name:"English translation",pct:48,label:"English translation"},
-      {key:"ai",name:"AI understanding and evidence extraction",pct:68,label:"AI understanding & evidence extraction"},
-      {key:"mom",name:"MoM preparation and validation",pct:88,label:"MoM preparation & validation"},
+      {key:"checking",name:"Validate meeting request",pct:8,label:"Checking meeting and processor access"},
+      {key:"upload",name:"Initialize processing status",pct:12,label:"Meeting audio confirmed in Google Drive"},
+      {key:"split",name:"Discover duration and dynamic matrix",pct:18,label:"Preparing automatic 10-minute batches"},
+      {key:"parallel",name:"Process batch",pct:55,label:"Parallel Whisper + AI processing of batches"},
+      {key:"ai",name:"Final synthesis and MoM",pct:84,label:"Compiling all batch evidence with final AI"},
+      {key:"mom",name:"Final synthesis and MoM",pct:94,label:"Validating evidence and building the final MoM"},
       {key:"complete",name:"Results ready",pct:100,label:"Results ready"}
     ];
     let current=stages[0];
