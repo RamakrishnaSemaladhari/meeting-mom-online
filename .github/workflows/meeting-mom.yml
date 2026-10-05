@@ -59,11 +59,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ollama
-          key: ${{ runner.os }}-ollama-qwen2.5-1.5b-instruct-q3_K_L-v1
+          key: ${{ runner.os }}-ollama-qwen3-4b-instruct-2507-q4_K_M-v1
 
       - name: Prepare AI model cache
         env:
-          AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
+          AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
+          AI_NUM_CTX: 8192
+          AI_NUM_PREDICT: 1400
           OLLAMA_MODELS: /home/runner/.ollama/models
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
@@ -216,11 +218,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ollama
-          key: ${{ runner.os }}-ollama-qwen2.5-1.5b-instruct-q3_K_L-v1
+          key: ${{ runner.os }}-ollama-qwen3-4b-instruct-2507-q4_K_M-v1
 
       - name: Prepare AI engine on GitHub runner
         env:
-          AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
+          AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
+          AI_NUM_CTX: 8192
+          AI_NUM_PREDICT: 1400
           OLLAMA_MODELS: /home/runner/.ollama/models
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
@@ -286,7 +290,9 @@ jobs:
 
       - name: AI understanding and evidence extraction
         env:
-          AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
+          AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
+          AI_NUM_CTX: 8192
+          AI_NUM_PREDICT: 1400
           OLLAMA_MODELS: /home/runner/.ollama/models
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
@@ -298,7 +304,9 @@ jobs:
 
       - name: MoM preparation and validation
         env:
-          AI_MODEL: qwen2.5:1.5b-instruct-q3_K_L
+          AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
+          AI_NUM_CTX: 8192
+          AI_NUM_PREDICT: 1400
           OLLAMA_MODELS: /home/runner/.ollama/models
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
