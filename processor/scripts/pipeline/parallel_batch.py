@@ -348,10 +348,17 @@ def stage_worker():
 def stage_finalize():
     store = DriveStore.from_env()
     meeting = env("MEETING_FOLDER_ID")
-    total = int(env("BATCH_TOTAL", "0"))
-    duration = float(env("MEETING_DURATION_SECONDS", "0"))
-    if not meeting or total < 1:
-        raise MomError("MOM-002", "Parallel finalizer is missing meeting/batch parameters.")
+    total_raw = env("BATCH_TOTAL", "")
+    duration_raw = env("MEETING_DURATION_SECONDS", "")
+    if not meeting or not total_raw or not duration_raw:
+        raise MomError("MOM-002", "Parallel finalizer requires MEETING_FOLDER_ID, BATCH_TOTAL and MEETING_DURATION_SECONDS from a successful prepare job.")
+    try:
+        total = int(total_raw)
+        duration = float(duration_raw)
+    except ValueError as exc:
+        raise MomError("MOM-002", f"Invalid parallel finalizer parameters: {exc}")
+    if total < 1 or duration <= 0:
+        raise MomError("MOM-002", "Parallel finalizer received invalid batch count or meeting duration.")
     metadata_file = store.find_one(meeting, "meeting_metadata.json")
     if not metadata_file:
         raise MomError("MOM-002", "meeting_metadata.json was not found.")
