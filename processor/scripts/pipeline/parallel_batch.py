@@ -168,8 +168,15 @@ def stage_worker():
     audio_folder = env("AUDIO_FOLDER_ID")
     audio_id = env("AUDIO_FILE_ID")
     index = int(env("BATCH_INDEX", "0"))
-    total = int(env("BATCH_TOTAL", "0"))
-    duration = float(env("MEETING_DURATION_SECONDS", "0"))
+    total_raw = env("BATCH_TOTAL", "")
+    duration_raw = env("MEETING_DURATION_SECONDS", "")
+    if not total_raw or not duration_raw:
+        raise MomError("MOM-002", "Parallel finalizer requires BATCH_TOTAL and MEETING_DURATION_SECONDS from a successful prepare job.")
+    try:
+        total = int(total_raw)
+        duration = float(duration_raw)
+    except ValueError as exc:
+        raise MomError("MOM-002", f"Invalid parallel finalizer parameters: {exc}")
     if index < 1 or total < 1 or not meeting or not audio_folder or not audio_id:
         raise MomError("MOM-002", "Parallel batch worker is missing meeting/audio/batch parameters.")
 
