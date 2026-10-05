@@ -164,7 +164,7 @@ def _aggregate_batches(metadata, batch_results, text_fn, previous=None, model=""
     result = {k: result[k] for k in ai_mod.OUTPUT_KEYS}
     result["schema_version"] = ai_mod.SCHEMA_VERSION
     result["generated_with"] = {
-        "ai_model": final_model, "batch_ai_model": batch_model, "batch_ai_model": env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M"), "batches": len(batch_results), "batch_seconds": BATCH_SECONDS
+        "ai_model": model, "batch_ai_model": env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M"), "batches": len(batch_results), "batch_seconds": BATCH_SECONDS
     }
     result["previous_meeting_context"] = {
         "used_as_reference": bool(previous),
@@ -272,7 +272,7 @@ def stage_batch(ctx):
 
     st.update("SUMMARIZING", "Combining all batches into one complete meeting understanding",
               84, batch_index=len(files), batch_total=len(files))
-    final_json_fn, final_text_fn = ai_mod.make_ollama_fns(final_model)
+    _final_json_fn, final_text_fn = ai_mod.make_ollama_fns(final_model)
     final_ai = _aggregate_batches(metadata, batch_results, final_text_fn, previous=previous, model=final_model)
     final_ai["batch_manifest"] = {
         "total": len(files), "batch_seconds": BATCH_SECONDS, "duration_seconds": duration
