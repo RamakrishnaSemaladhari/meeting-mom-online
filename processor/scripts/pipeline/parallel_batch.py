@@ -35,7 +35,7 @@ WORK = Path(".meeting_work_parallel")
 WHISPER = Path("whisper.cpp/build/bin/whisper-cli")
 WHISPER_MODEL = Path(os.environ.get("WHISPER_MODEL_PATH", "whisper.cpp/models/ggml-small-q5_1.bin"))
 FALLBACK_MODEL = Path(os.environ.get("WHISPER_FALLBACK_MODEL_PATH", "whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin"))
-VAD_MODEL = Path(os.environ.get("WHISPER_VAD_MODEL_PATH", "whisper.cpp/models/ggml-silero-v5.1.2.bin")
+VAD_MODEL = Path(os.environ.get("WHISPER_VAD_MODEL_PATH", "whisper.cpp/models/ggml-silero-v5.1.2.bin"))
 JSON_MIME = "application/json"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -360,3 +360,20 @@ def stage_finalize():
         "updated_at": now(), "completed_at": now(), "batch_index": total, "batch_total": total
     }
     store.upsert_text(meeting, "PROCESSING_STATUS.json", dump(status), JSON_MIME)
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["prepare", "worker", "finalize"], required=True)
+    args = parser.parse_args()
+    if args.mode == "prepare":
+        stage_prepare()
+    elif args.mode == "worker":
+        stage_worker()
+    else:
+        stage_finalize()
+
+
+if __name__ == "__main__":
+    main()
