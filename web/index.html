@@ -157,12 +157,12 @@
       </div>
       <div class="stage-track"><div id="processingFill" class="stage-fill"></div></div>
       <div class="stage-list">
-        <div class="stage" data-stage="checking"><span class="stage-dot"></span>Existing meeting & audio confirmed</div>
-        <div class="stage" data-stage="upload"><span class="stage-dot"></span>Upload new audio (only for a new meeting)</div>
-        <div class="stage" data-stage="whisper"><span class="stage-dot"></span>Whisper transcription</div>
-        <div class="stage" data-stage="translation"><span class="stage-dot"></span>English translation</div>
-        <div class="stage" data-stage="ai"><span class="stage-dot"></span>AI understanding & evidence extraction</div>
-        <div class="stage" data-stage="mom"><span class="stage-dot"></span>MoM preparation & validation</div>
+        <div class="stage" data-stage="checking"><span class="stage-dot"></span>Meeting request validated</div>
+        <div class="stage" data-stage="upload"><span class="stage-dot"></span>Audio confirmed in Google Drive</div>
+        <div class="stage" data-stage="split"><span class="stage-dot"></span>Automatic 10-minute batch split</div>
+        <div class="stage" data-stage="parallel"><span class="stage-dot"></span>Parallel Whisper + AI batch processing</div>
+        <div class="stage" data-stage="ai"><span class="stage-dot"></span>Final AI consolidation of all evidence</div>
+        <div class="stage" data-stage="mom"><span class="stage-dot"></span>Evidence validation + final MoM</div>
         <div class="stage" data-stage="complete"><span class="stage-dot"></span>Results ready</div>
       </div>
       <div class="processing-current"><span class="processing-label">Currently:</span> <span id="processingStageText">Preparing your meeting...</span></div>
@@ -270,6 +270,6 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=25"></script>\n<script src="batch.js?v=2"></script>
+<script src="app.js?v=26"></script>\n<script src="batch.js?v=2"></script>
 </body>
 </html>
