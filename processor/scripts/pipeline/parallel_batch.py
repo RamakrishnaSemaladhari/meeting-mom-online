@@ -55,6 +55,16 @@ def log(msg):
     print(msg, flush=True)
 
 
+def github_run_fields():
+    run_id = env("GITHUB_RUN_ID")
+    repo = env("GITHUB_REPOSITORY")
+    server = env("GITHUB_SERVER_URL", "https://github.com")
+    return {
+        "github_run_id": run_id,
+        "github_run_url": (f"{server}/{repo}/actions/runs/{run_id}" if run_id and repo else "")
+    }
+
+
 def run_cmd(cmd, code):
     log("$ " + " ".join(map(str, cmd)))
     try:
@@ -249,6 +259,7 @@ def stage_prepare():
         "batch_index": 0,
         "batch_total": total,
         "duration_seconds": duration,
+        **github_run_fields(),
         "updated_at": now()
     }
     store.upsert_text(env("MEETING_FOLDER_ID"), "PROCESSING_STATUS.json", dump(status), JSON_MIME)
@@ -515,6 +526,7 @@ def stage_finalize():
         "message": f"All {total} parallel batches completed. Final AI consolidation is running.",
         "batch_index": total,
         "batch_total": total,
+        **github_run_fields(),
         "updated_at": now()
     }), JSON_MIME)
 
@@ -529,7 +541,7 @@ def stage_finalize():
     final_ai["batch_manifest"] = {
         "total": total, "batch_seconds": BATCH_SECONDS, "duration_seconds": duration,
         "parallel": True, "batch_ai_model": env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M"),
-        "final_ai_model": final_model
+        "final_ai_model": final_model, **github_run_fields()
     }
     store.upsert_text(meeting, "PROCESSING_STATUS.json", dump({
         "meeting_id": env("MEETING_ID"),
@@ -577,6 +589,7 @@ def stage_finalize():
         "meeting_id": env("MEETING_ID"), "status": "COMPLETED", "stage": "COMPLETED",
         "progress_percent": 100, "current_stage": "batch_finalize",
         "message": f"Completed {total} parallel batches and final synthesis.",
+        **github_run_fields(),
         "updated_at": now(), "completed_at": now(), "batch_index": total, "batch_total": total
     }
     store.upsert_text(meeting, "PROCESSING_STATUS.json", dump(status), JSON_MIME)
