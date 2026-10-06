@@ -36,7 +36,7 @@ function status(message, kind="") {
   el.className = "status " + kind;
 }
 
-const PROCESS_STAGES = ["checking","upload","split","parallel","ai","mom","complete"];
+const PROCESS_STAGES = ["upload","dispatch","prepare","whisper","translation","ai","summary","mom","complete"];
 const PROCESS_LABELS = {
   checking: "Checking your existing meeting and audio",
   upload: "Audio confirmed in Google Drive",
@@ -79,7 +79,7 @@ function showRecoveredProcessingUI(message) {
     const el = document.querySelector('.stage[data-stage="' + name + '"]');
     if (!el) return;
     el.classList.remove("done","active");
-    el.classList.toggle("active", name === "checking");
+    el.classList.toggle("active", name === "upload");
   });
   $("processingStageText").textContent = "Existing audio confirmed. No new upload is required.";
   $("processingStageEta").textContent = "Stage remaining: Checking processing status…";
@@ -163,13 +163,36 @@ function renderBackgroundProcessing() {
   });
 }
 
-function clearBackgroundMeeting(id) {
+async function requestProcessingCancellation(item) {
+  if (!item?.runId || !item?.meetingFolderId) throw new Error("No verified GitHub run is attached to this meeting.");
+  await fetch(CONFIG.gateway, {
+    method:"POST",
+    mode:"no-cors",
+    headers:{"Content-Type":"text/plain;charset=UTF-8"},
+    body:JSON.stringify({
+      action:"cancel_processing",
+      meeting_id:item.id,
+      meeting_folder_id:item.meetingFolderId,
+      run_id:String(item.runId),
+      percent:Number(item.percent || 0)
+    })
+  });
+  updateBackgroundProcessing(item.id,{statusText:"Cancellation requested — waiting for GitHub confirmation"});
+  setTimeout(function(){monitorDriveProcessingStatus(item);},1500);
+}
+
+async function clearBackgroundMeeting(id) {
   const item = backgroundProcessing.find(function(x) { return x.id === id; });
   if (!item) return;
 
   const active = item.runId && item.stage !== "failed" && item.stage !== "complete";
   if (active) {
-    status("This meeting is already running on GitHub Actions. It cannot be force-cancelled from the public page; the item was not deleted.", "error");
+    try {
+      await requestProcessingCancellation(item);
+      status("Stop request sent through the Google Apps Script control tower. Waiting for verified GitHub cancellation.", "success");
+    } catch (e) {
+      status("Stop request could not be confirmed: " + e.message, "error");
+    }
     return;
   }
 
@@ -1317,7 +1340,7 @@ async function createInitialProcessingStatus(snapshot) {
     meeting_id: snapshot.meeting.id,
     stage: "QUEUED",
     progress_percent: 5,
-    message: "Processing request sent. Waiting for GitHub Actions to begin.",
+    message: "Audio verified. Google control tower is dispatching GitHub Actions.",
     status: "PROCESSING",
     updated_at: new Date().toISOString(),
     github_run_id: null
@@ -1360,6 +1383,57 @@ async function persistProcessingRunId(item, runId) {
   } catch (_) {}
 }
 
+async function readControlStatus(item) {
+  if (!item?.meetingFolderId) return null;
+  try {
+    const files = await listDriveFiles(
+      "'" + item.meetingFolderId + "' in parents and name = 'CONTROL_STATUS.json' and trashed = false",
+      "files(id,name,modifiedTime)"
+    );
+    if (!files[0]) return null;
+    const response = await driveRequest(
+      "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(files[0].id) + "?alt=media"
+    );
+    return await response.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+function renderVerifiedStatus(item, control, processor, batchProgress) {
+  const drive = $("verifyDrive"), gh = $("verifyGithub"), pr = $("verifyProcessor"), out = $("verifyOutput");
+  const source = $("verifySource"), batches = $("batchProgress");
+  if (!drive || !gh || !pr || !out) return;
+
+  const driveOk = !!(item?.meetingFolderId && item?.meetingFolderId === item?.id || item?.meetingFolderId);
+  drive.textContent = driveOk ? "✓ Drive workspace identified" : "Drive: not verified";
+  drive.className = "verified-item " + (driveOk ? "verified-ok" : "verified-warn");
+
+  const runId = processor?.github_run_id || control?.github?.run_id || item?.runId || "";
+  const ghStatus = control?.github?.status || "";
+  gh.textContent = runId ? "✓ GitHub Run #" + runId + (ghStatus ? " — " + ghStatus : "") : "GitHub: waiting for run";
+  gh.className = "verified-item " + (runId ? "verified-ok" : "verified-warn");
+
+  const pstage = processor?.stage || control?.processor?.stage || control?.control_status || "WAITING";
+  pr.textContent = "● Processor: " + pstage;
+  pr.className = "verified-item " + (processor ? "verified-ok" : "verified-warn");
+
+  const complete = String(processor?.status || "").toUpperCase() === "COMPLETED";
+  const hasMom = complete || !!processor?.completed_at;
+  out.textContent = hasMom ? "✓ Final output verified" : "Output: not final yet";
+  out.className = "verified-item " + (hasMom ? "verified-ok" : "verified-warn");
+
+  const stamp = processor?.updated_at || control?.updated_at || "";
+  source.textContent = stamp ? "Authoritative status updated " + new Date(stamp).toLocaleString("en-IN") + " • Drive processor + GitHub control tower" : "Waiting for authoritative status sources…";
+
+  if (batches) {
+    if (!batchProgress) { batches.innerHTML = ""; return; }
+    batches.innerHTML = '<div class="batch-item"><span>Parallel batches</span><span class="batch-state">' +
+      batchProgress.completed + "/" + batchProgress.total + " complete" +
+      (batchProgress.failed ? " • " + batchProgress.failed + " failed" : "") + "</span></div>";
+  }
+}
+
 async function readProcessingStatus(item) {
   if (!item || !item.meetingFolderId) return null;
   try {
@@ -1381,13 +1455,16 @@ async function readProcessingStatus(item) {
 function driveStageToUi(stage) {
   const s = String(stage || "").toUpperCase();
   if (s === "COMPLETED") return "complete";
-  if (s === "FAILED") return "checking";
-  if (s === "ANALYZING") return "parallel";
-  if (s === "SUMMARIZING") return "ai";
+  if (s === "FAILED" || s === "CANCELLED") return "mom";
+  if (s === "QUEUED") return "dispatch";
+  if (s === "SPLITTING") return "prepare";
+  if (s === "ANALYZING") return "ai";
+  if (s === "SUMMARIZING") return "summary";
   if (s === "GENERATING_MOM" || s === "UPLOADING") return "mom";
-  if (s === "TRANSLATING") return "parallel";
-  if (s === "TRANSCRIBING" || s === "CONVERTING" || s === "DOWNLOADING") return "parallel";
-  return "checking";
+  if (s === "TRANSLATING") return "translation";
+  if (s === "TRANSCRIBING") return "whisper";
+  if (s === "CONVERTING" || s === "DOWNLOADING") return "prepare";
+  return "dispatch";
 }
 
 async function readParallelBatchProgress(item) {
@@ -1481,19 +1558,19 @@ async function monitorDriveProcessingStatus(item) {
     }
   }
 
-  const batchProgress = await readParallelBatchProgress(item);
+  const batchProgress = await readParallelBatchProgress(item);\n  renderVerifiedStatus(item, control, data, batchProgress);
   if (batchProgress && item.stage !== "complete" && item.stage !== "failed") {
     const label = batchProgress.failed
       ? "Parallel batches: " + batchProgress.completed + "/" + batchProgress.total + " complete; " + batchProgress.failed + " failed"
       : "Parallel batches: " + batchProgress.completed + "/" + batchProgress.total + " complete";
     updateBackgroundProcessing(item.id, {
       percent: batchProgress.percent,
-      stage: batchProgress.completed === batchProgress.total ? "ai" : "parallel",
+      stage: batchProgress.completed === batchProgress.total ? "summary" : "whisper",
       statusText: label
     });
     if (meetingFolders?.meeting?.id === item.id) {
       showProcessingUI(
-        batchProgress.completed === batchProgress.total ? "ai" : "parallel",
+        batchProgress.completed === batchProgress.total ? "summary" : "whisper",
         batchProgress.percent,
         batchProgress.failed ? "Review failed batch status" : (batchProgress.total - batchProgress.completed) + " batch(es) remaining",
         "Parallel processing: " + batchProgress.completed + "/" + batchProgress.total + " batches complete"
@@ -1577,7 +1654,7 @@ async function notifyProcessingStarted(snapshot, options) {
     throw new Error("Processing gateway request could not be sent: " + err.message);
   }
 
-  const item = addBackgroundProcessing(snapshot, "Processing request queued — waiting for GitHub Actions", {
+  const item = addBackgroundProcessing(snapshot, "Control tower dispatch sent — waiting for verified GitHub run", {
     stage: "checking",
     percent: 5
   });
@@ -1611,7 +1688,7 @@ async function findAndMonitorLatestRun(item,requestStarted) {
     const data=await r.json();
     const since=Date.parse(requestStarted)-30000;
     const run=(data.workflow_runs||[]).find(function(x){return Date.parse(x.created_at)>=since;});
-    if (!run) { updateBackgroundProcessing(item.id,{statusText:"Processing request sent — waiting for GitHub Actions"}); setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000); return; }
+    if (!run) { updateBackgroundProcessing(item.id,{statusText:"Control tower dispatch sent — waiting for verified GitHub run"}); setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000); return; }
     updateBackgroundProcessing(item.id,{runId:run.id,statusText:run.status==="completed" ? (run.conclusion==="success" ? "Processing complete" : "Processing failed") : "Processing started",percent:run.status==="completed"&&run.conclusion==="success"?100:8});
     await persistProcessingRunId(item, run.id);
     monitorWorkflowRun(Object.assign({},item,{runId:run.id}));
@@ -1714,17 +1791,17 @@ async function monitorWorkflowRun(item) {
 
     if (/^prepare/.test(job?.name || "")) {
       if (step("Discover duration and dynamic matrix")?.status === "in_progress") {
-        current = {key:"split",pct:18,label:"Preparing automatic 10-minute batches"};
+        current = {key:"prepare",pct:25,label:"Preparing automatic 10-minute batches"};
       } else if (step("Initialize processing status")?.status === "in_progress") {
-        current = {key:"upload",pct:12,label:"Meeting audio confirmed in Google Drive"};
+        current = {key:"upload",pct:15,label:"Meeting audio confirmed in Google Drive"};
       }
     } else if (/^parallel-batches/.test(job?.name || "")) {
-      current = {key:"parallel",pct:55,label:"Parallel Whisper + AI processing of 10-minute batches"};
+      current = {key:"whisper",pct:55,label:"Parallel Whisper + AI processing of 10-minute batches"};
     } else if (/^finalize/.test(job?.name || "")) {
       if (step("Final synthesis and MoM")?.status === "in_progress") {
-        current = {key:"ai",pct:84,label:"Compiling all batch evidence with final AI"};
+        current = {key:"summary",pct:84,label:"Compiling all batch evidence with final AI"};
       } else if (step("Start local Ollama")?.status === "in_progress") {
-        current = {key:"ai",pct:82,label:"Starting final AI consolidation"};
+        current = {key:"summary",pct:82,label:"Starting final AI consolidation"};
       } else {
         current = {key:"mom",pct:94,label:"Validating evidence and building the final MoM"};
       }
