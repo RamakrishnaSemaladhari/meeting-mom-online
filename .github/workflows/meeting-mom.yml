@@ -101,7 +101,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(env.MAX_PARALLEL_BATCHES) }}
+      max-parallel: 8
       matrix:
         batch_index: ${{ fromJSON(needs.prepare.outputs.matrix_json) }}
     env:
