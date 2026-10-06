@@ -22,6 +22,8 @@ let recordedChunks = [];
 let isRecording = false;
 let pendingProcessingMeeting = null;
 let backgroundProcessing = JSON.parse(localStorage.getItem("meeting_mom_processing_queue") || "[]");
+// User-removed queued meetings must never be reattached to a later GitHub run.
+const cancelledProcessingIds = new Set();
 let continuitySourceType = "meeting_id";
 let continuityFileText = "";
 let continuityFileName = "";
@@ -136,12 +138,14 @@ function renderBackgroundProcessing() {
       '<div><b>' + title + '</b><div class="muted small">' + time + '</div></div>' +
       '<div class="background-status">' +
         '<div>' + statusText + '</div>' +
-        (canRestart
-          ? '<div class="background-actions">' +
-              '<button type="button" class="secondary mini background-retry" data-meeting-id="' + escapeHtml(item.id) + '">RESTART PROCESSING</button>' +
-              '<button type="button" class="secondary mini background-clear" data-meeting-id="' + escapeHtml(item.id) + '">CLEAR</button>' +
-            '</div>'
-          : '') +
+        '<div class="background-actions">' +
+          (canRestart
+            ? '<button type="button" class="secondary mini background-retry" data-meeting-id="' + escapeHtml(item.id) + '">RESTART PROCESSING</button>'
+            : '') +
+          '<button type="button" class="secondary mini background-clear" data-meeting-id="' + escapeHtml(item.id) + '">' +
+            (item.runId && item.stage !== "failed" && item.stage !== "complete" ? "STOP & DELETE" : "DELETE") +
+          '</button>' +
+        '</div>' +
       '</div>' +
       '</div>';
   }).join("");
@@ -165,10 +169,13 @@ function clearBackgroundMeeting(id) {
 
   const active = item.runId && item.stage !== "failed" && item.stage !== "complete";
   if (active) {
-    status("This meeting is still processing. Clear is available after it stops or fails.", "error");
+    status("This meeting is already running on GitHub Actions. It cannot be force-cancelled from the public page; the item was not deleted.", "error");
     return;
   }
 
+  // A queued item with no GitHub run ID has not started processing. Removing it
+  // also prevents the browser's waiting poll from attaching a future run.
+  cancelledProcessingIds.add(id);
   backgroundProcessing = backgroundProcessing.filter(function(x) { return x.id !== id; });
   saveBackgroundProcessingQueue();
   renderBackgroundProcessing();
@@ -1427,7 +1434,7 @@ async function readParallelBatchProgress(item) {
 }
 
 async function monitorDriveProcessingStatus(item) {
-  if (!item || item.stage === "complete" || item.stage === "failed") return;
+  if (!item || cancelledProcessingIds.has(item.id) || item.stage === "complete" || item.stage === "failed") return;
   const data = await readProcessingStatus(item);
   if (data) {
     const pct = Number(data.progress_percent || 5);
@@ -1596,7 +1603,7 @@ async function notifyProcessingStarted(snapshot, options) {
 }
 
 async function findAndMonitorLatestRun(item,requestStarted) {
-  if (!item || !item.id) return;
+  if (!item || !item.id || cancelledProcessingIds.has(item.id)) return;
   try {
     const url="https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs?event=repository_dispatch&per_page=10";
     const r=await fetch(url,{headers:{"Accept":"application/vnd.github+json"}});
@@ -1612,7 +1619,7 @@ async function findAndMonitorLatestRun(item,requestStarted) {
 }
 
 async function monitorWorkflowRun(item) {
-  if (!item || !item.runId) return;
+  if (!item || !item.runId || cancelledProcessingIds.has(item.id)) return;
   try {
     const runResponse = await fetch(
       "https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs/" + item.runId,
