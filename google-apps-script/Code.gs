@@ -810,57 +810,126 @@ function startProcessing_(data) {
   }
 
 
-  const rowNumber =
+  const sheet =
+    getRegistrySheet_();
+
+
+  let rowNumber =
     findMeetingRow_(
       meetingId
     );
 
 
-  if (rowNumber < 2) {
-
-    throw new Error(
-      'Meeting not found: ' +
-      meetingId
-    );
-  }
-
-
-  const sheet =
-    getRegistrySheet_();
-
-
-  const row =
-    getRowObject_(
-      sheet,
-      rowNumber
-    );
+  let row =
+    rowNumber >= 2
+      ? getRowObject_(
+          sheet,
+          rowNumber
+        )
+      : null;
 
 
   /*
-   * Exact audio file ID.
-   *
-   * This is critical for the
-   * current GitHub workflow.
+   * Exact Drive IDs supplied by the
+   * production UI. If a registry row
+   * already exists, its values remain
+   * the fallback source.
    */
   const audioFileId =
     clean_(
       data.audio_file_id ||
-      row['Audio File ID']
+      (row ? row['Audio File ID'] : '')
     );
 
 
   const audioFolderId =
     clean_(
       data.audio_folder_id ||
-      row['Audio Folder ID']
+      (row ? row['Audio Folder ID'] : '')
     );
 
 
   const meetingFolderId =
     clean_(
       data.meeting_folder_id ||
-      row['Meeting Folder ID']
+      (row ? row['Meeting Folder ID'] : '')
     );
+
+
+  /*
+   * The browser creates the Drive
+   * workspace directly. Therefore a
+   * missing registry row must not block
+   * production processing. Register the
+   * exact workspace here before dispatch.
+   */
+  if (rowNumber < 2) {
+
+    const registration =
+      createMeeting_({
+        meeting_id:
+          meetingId,
+
+        meeting_title:
+          clean_(data.meeting_title) ||
+          ('Meeting ' + meetingId),
+
+        meeting_initiator:
+          clean_(data.meeting_initiator) ||
+          'Web UI',
+
+        meeting_mode:
+          clean_(data.meeting_mode) ||
+          'ONLINE',
+
+        processing_engine:
+          clean_(data.processing_engine) ||
+          'ONLINE',
+
+        meeting_date:
+          clean_(data.meeting_date),
+
+        start_time:
+          clean_(data.start_time),
+
+        end_time:
+          clean_(data.end_time),
+
+        audio_minutes:
+          data.audio_minutes,
+
+        venue:
+          clean_(data.venue),
+
+        agenda:
+          clean_(data.agenda),
+
+        participants:
+          clean_(data.participants),
+
+        audio_file_id:
+          audioFileId,
+
+        audio_folder_id:
+          audioFolderId,
+
+        meeting_folder_id:
+          meetingFolderId
+
+      });
+
+
+    rowNumber =
+      registration.row;
+
+
+    row =
+      getRowObject_(
+        sheet,
+        rowNumber
+      );
+
+  }
 
 
   /*
