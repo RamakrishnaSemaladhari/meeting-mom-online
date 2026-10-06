@@ -1514,6 +1514,7 @@ async function readParallelBatchProgress(item) {
 
 async function monitorDriveProcessingStatus(item) {
   if (!item || cancelledProcessingIds.has(item.id) || item.stage === "complete" || item.stage === "failed") return;
+  const control = await readControlStatus(item);
   const data = await readProcessingStatus(item);
   if (data) {
     const pct = Number(data.progress_percent || 5);
@@ -1685,6 +1686,14 @@ async function notifyProcessingStarted(snapshot, options) {
 async function findAndMonitorLatestRun(item,requestStarted) {
   if (!item || !item.id || cancelledProcessingIds.has(item.id)) return;
   try {
+    const control = await readControlStatus(item);
+    const controlledRunId = control?.github?.run_id ? String(control.github.run_id) : "";
+    if (controlledRunId) {
+      updateBackgroundProcessing(item.id,{runId:controlledRunId,statusText:"GitHub Actions Run #"+controlledRunId+" verified"});
+      await persistProcessingRunId(item, controlledRunId);
+      monitorWorkflowRun(Object.assign({},item,{runId:controlledRunId}));
+      return;
+    }
     const url="https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs?event=repository_dispatch&per_page=10";
     const r=await fetch(url,{headers:{"Accept":"application/vnd.github+json"}});
     if (!r.ok) throw new Error("Could not read processing status.");
