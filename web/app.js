@@ -1757,7 +1757,7 @@ async function notifyProcessingStarted(snapshot, options) {
     throw new Error("Processing gateway request could not be sent: " + err.message);
   }
 
-  const item = addBackgroundProcessing(snapshot, "Control tower dispatch sent — waiting for verified GitHub run", {
+  const item = addBackgroundProcessing(snapshot, "Gateway request submitted — verifying GitHub dispatch", {
     stage: "checking",
     percent: 5,
     meetingFolderId: snapshot.meeting.id,
@@ -1789,25 +1789,41 @@ async function notifyProcessingStarted(snapshot, options) {
 async function findAndMonitorLatestRun(item,requestStarted) {
   if (!item || !item.id || cancelledProcessingIds.has(item.id)) return;
   try {
+    // CONTROL_STATUS.json is the authoritative bridge between Apps Script
+    // and the exact GitHub Actions run for this meeting. Never guess by
+    // selecting the newest repository_dispatch run.
     const control = await readControlStatus(item);
     const controlledRunId = control?.github?.run_id ? String(control.github.run_id) : "";
+    const controlStatus = String(control?.control_status || "").toUpperCase();
+
     if (controlledRunId) {
-      updateBackgroundProcessing(item.id,{runId:controlledRunId,statusText:"GitHub Actions Run #"+controlledRunId+" verified"});
+      updateBackgroundProcessing(item.id,{
+        runId: controlledRunId,
+        statusText:"GitHub Actions Run #"+controlledRunId+" verified"
+      });
       await persistProcessingRunId(item, controlledRunId);
       monitorWorkflowRun(Object.assign({},item,{runId:controlledRunId}));
       return;
     }
-    const url="https://api.github.com/repos/RamakrishnaSemaladhari/meeting-mom-online/actions/runs?event=repository_dispatch&per_page=10";
-    const r=await fetch(url,{headers:{"Accept":"application/vnd.github+json"}});
-    if (!r.ok) throw new Error("Could not read processing status.");
-    const data=await r.json();
-    const since=Date.parse(requestStarted)-30000;
-    const run=(data.workflow_runs||[]).find(function(x){return Date.parse(x.created_at)>=since;});
-    if (!run) { updateBackgroundProcessing(item.id,{statusText:"Control tower dispatch sent — waiting for verified GitHub run"}); setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000); return; }
-    updateBackgroundProcessing(item.id,{runId:run.id,statusText:run.status==="completed" ? (run.conclusion==="success" ? "Processing complete" : "Processing failed") : "Processing started",percent:run.status==="completed"&&run.conclusion==="success"?100:8});
-    await persistProcessingRunId(item, run.id);
-    monitorWorkflowRun(Object.assign({},item,{runId:run.id}));
-  } catch(e) { setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},15000); }
+
+    if (controlStatus === "FAILED") {
+      updateBackgroundProcessing(item.id,{
+        stage:"failed",
+        percent:Number(control?.processor?.progress_percent || 5),
+        statusText:control?.processor?.message || "Processing failed",
+        errorCode:control?.processor?.error_code || "PROCESSING_FAILED",
+        errorMessage:control?.processor?.error_message || ""
+      });
+      return;
+    }
+
+    updateBackgroundProcessing(item.id,{
+      statusText:"Gateway accepted — waiting for verified GitHub Actions run"
+    });
+    setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000);
+  } catch(e) {
+    setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},15000);
+  }
 }
 
 async function monitorWorkflowRun(item) {
