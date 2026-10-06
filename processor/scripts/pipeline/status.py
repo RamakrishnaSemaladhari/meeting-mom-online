@@ -83,6 +83,34 @@ class StatusReporter:
         })
         self._save()
 
+    def _control_status(self):
+        run_id = self.data.get("github_run_id") or os.environ.get("GITHUB_RUN_ID", "")
+        repo = os.environ.get("GITHUB_REPOSITORY", "")
+        server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+        return {
+            "meeting_id": self.data.get("meeting_id", ""),
+            "control_status": "FAILED" if self.data.get("status") == "FAILED" else (
+                "COMPLETED" if self.data.get("status") == "COMPLETED" else "RUNNING"
+            ),
+            "github": {
+                "run_id": str(run_id),
+                "run_url": f"{server}/{repo}/actions/runs/{run_id}" if run_id and repo else "",
+                "status": "completed" if self.data.get("status") in ("COMPLETED", "FAILED") else "in_progress",
+                "conclusion": "success" if self.data.get("status") == "COMPLETED" else (
+                    "failure" if self.data.get("status") == "FAILED" else ""
+                )
+            },
+            "processor": {
+                "status": self.data.get("status", ""),
+                "stage": self.data.get("stage", ""),
+                "progress_percent": self.data.get("progress_percent", 0),
+                "message": self.data.get("message", ""),
+                "error_code": self.data.get("error_code"),
+                "error_message": self.data.get("error_message")
+            },
+            "updated_at": self.data.get("updated_at", now())
+        }
+
     def _save(self):
         text = json.dumps(self.data, ensure_ascii=False, indent=2)
         self.local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +121,9 @@ class StatusReporter:
         for attempt in range(1, 4):
             try:
                 self.store.upsert_text(self.folder_id, STATUS_FILE, text, "application/json")
+                self.store.upsert_text(self.folder_id, "CONTROL_STATUS.json",
+                                       json.dumps(self._control_status(), ensure_ascii=False, indent=2),
+                                       "application/json")
                 return
             except Exception as exc:
                 last_error = exc
