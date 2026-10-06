@@ -1470,41 +1470,88 @@ function driveStageToUi(stage) {
 async function readParallelBatchProgress(item) {
   if (!item?.meetingFolderId || !accessToken) return null;
   try {
+    // The authoritative per-batch status files are stored directly in BATCHES.
+    const meetingManifestFiles = await listDriveFiles(
+      "'" + item.meetingFolderId + "' in parents and name = 'BATCH_MANIFEST.json' and trashed = false",
+      "files(id,name)"
+    );
+    let manifest = null;
+    if (meetingManifestFiles.length) {
+      try {
+        const r = await driveRequest("https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(meetingManifestFiles[0].id) + "?alt=media");
+        manifest = await r.json();
+      } catch (_) {}
+    }
+
     const meetingChildren = await listDriveFiles(
       "'" + item.meetingFolderId + "' in parents and name = 'BATCHES' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
       "files(id,name)"
     );
     if (!meetingChildren.length) return null;
 
-    const batchFolders = await listDriveFiles(
-      "'" + meetingChildren[0].id + "' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-      "files(id,name)"
+    const batchStatusFiles = await listDriveFiles(
+      "'" + meetingChildren[0].id + "' in parents and name contains 'BATCH_STATUS_' and trashed = false",
+      "files(id,name,modifiedTime)"
     );
-    if (!batchFolders.length) return null;
 
-    let completed = 0;
-    let failed = 0;
-    let active = 0;
-    for (const folder of batchFolders) {
-      const files = await listDriveFiles(
-        "'" + folder.id + "' in parents and name contains 'BATCH_STATUS_' and trashed = false",
-        "files(id,name)"
-      );
-      if (!files.length) continue;
+    const total = Number(manifest?.batch_total || 0) || Math.max(batchStatusFiles.length, 0);
+    if (!total) return null;
+
+    const stageScores = {
+      DOWNLOADING: 15,
+      CONVERTING: 32,
+      TRANSCRIBING: 52,
+      ANALYZING: 74,
+      COMPLETED: 100,
+      FAILED: 0
+    };
+    const stageLabels = {
+      DOWNLOADING: "downloading audio",
+      CONVERTING: "converting audio",
+      TRANSCRIBING: "Whisper transcription",
+      ANALYZING: "AI evidence + translation",
+      COMPLETED: "completed",
+      FAILED: "failed"
+    };
+
+    let completed = 0, failed = 0, active = 0, scoreTotal = 0;
+    const states = {};
+    let latestUpdated = "";
+
+    for (const file of batchStatusFiles) {
       try {
-        const r = await driveRequest("https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(files[0].id) + "?alt=media");
+        const r = await driveRequest("https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(file.id) + "?alt=media");
         const data = await r.json();
         const state = String(data.status || "").toUpperCase();
+        states[state] = (states[state] || 0) + 1;
         if (state === "COMPLETED") completed++;
         else if (state === "FAILED") failed++;
         else active++;
+        scoreTotal += stageScores[state] !== undefined ? stageScores[state] : 5;
+        if (data.updated_at && (!latestUpdated || data.updated_at > latestUpdated)) latestUpdated = data.updated_at;
       } catch (_) {}
     }
 
-    const total = batchFolders.length;
-    if (!total) return null;
-    const percent = Math.max(18, Math.min(82, 18 + Math.round((completed / total) * 64)));
-    return {total, completed, failed, active, percent};
+    // 18% is the real completed prepare milestone. The remainder is calculated
+    // from the actual states reported by the parallel workers, not a timer.
+    const averageScore = batchStatusFiles.length ? (scoreTotal / batchStatusFiles.length) : 0;
+    const percent = Math.max(18, Math.min(82, Math.round(18 + (averageScore * 0.64))));
+
+    let dominantState = "QUEUED";
+    const dominantCount = Object.keys(states).sort((a,b) => (states[b]||0) - (states[a]||0))[0];
+    if (dominantCount) dominantState = dominantCount;
+
+    const activeBreakdown = Object.keys(states)
+      .filter(k => k !== "COMPLETED")
+      .map(k => states[k] + " " + (stageLabels[k] || k.toLowerCase()))
+      .join(" • ");
+
+    return {
+      total, completed, failed, active, percent,
+      states, dominantState,
+      activeBreakdown,
+      updatedAt: latestUpdated
+    };
   } catch (_) {
     return null;
   }
@@ -1563,8 +1610,10 @@ async function monitorDriveProcessingStatus(item) {
   renderVerifiedStatus(item, control, data, batchProgress);
   if (batchProgress && item.stage !== "complete" && item.stage !== "failed") {
     const label = batchProgress.failed
-      ? "Parallel batches: " + batchProgress.completed + "/" + batchProgress.total + " complete; " + batchProgress.failed + " failed"
-      : "Parallel batches: " + batchProgress.completed + "/" + batchProgress.total + " complete";
+      ? "Live batches: " + batchProgress.completed + "/" + batchProgress.total + " complete; " + batchProgress.failed + " failed" +
+        (batchProgress.activeBreakdown ? " • " + batchProgress.activeBreakdown : "")
+      : "Live batches: " + batchProgress.completed + "/" + batchProgress.total + " complete" +
+        (batchProgress.activeBreakdown ? " • " + batchProgress.activeBreakdown : "");
     updateBackgroundProcessing(item.id, {
       percent: batchProgress.percent,
       stage: batchProgress.completed === batchProgress.total ? "summary" : "whisper",
@@ -1743,11 +1792,13 @@ async function monitorWorkflowRun(item) {
     const jobsData = await jobsResponse.json();
     const jobs = jobsData.jobs || [];
 
-    // A repository-dispatch run is successful only when the complete workflow succeeds.
+    // The GitHub run is authoritative for run identity/state. The Drive
+    // PROCESSING_STATUS + BATCH_STATUS files are authoritative for the live
+    // processing percentage. Never invent a percentage from elapsed time.
     if (run.status === "completed" && run.conclusion !== "success") {
       updateBackgroundProcessing(item.id, {
         stage: "failed",
-        statusText: "Processing failed"
+        statusText: "GitHub Run #" + item.runId + " finished: " + (run.conclusion || "failed")
       });
       if (meetingFolders?.meeting?.id === item.id) {
         ensureRetryButton();
@@ -1756,13 +1807,9 @@ async function monitorWorkflowRun(item) {
           retryButton.disabled = false;
           retryButton.textContent = "RETRY PROCESSING";
         }
-        if ($("uploadText")) {
-          $("uploadText").textContent =
-            "Processing failed. The existing audio is still available. Retry without uploading it again.";
-        }
         if ($("processingSummaryHint")) {
           $("processingSummaryHint").textContent =
-            "Processing stopped before final completion. Existing audio remains available for retry.";
+            "GitHub Run #" + item.runId + " stopped with " + (run.conclusion || "failure") + ". Existing audio remains available for retry.";
         }
       }
       return;
@@ -1772,7 +1819,7 @@ async function monitorWorkflowRun(item) {
       updateBackgroundProcessing(item.id, {
         stage: "complete",
         percent: 100,
-        statusText: "Results ready"
+        statusText: "GitHub Run #" + item.runId + " completed successfully"
       });
       if (meetingFolders?.meeting?.id === item.id) {
         if (retryButton) retryButton.classList.add("hidden");
@@ -1786,71 +1833,33 @@ async function monitorWorkflowRun(item) {
     }
 
     const activeJobs = jobs.filter(j => j.status === "in_progress" || j.status === "queued");
-    const job = activeJobs[0] ||
-      jobs.find(j => /^finalize/.test(j.name)) ||
+    const job = activeJobs[0] || jobs.find(j => /^finalize/.test(j.name)) ||
       jobs.find(j => /^parallel-batches/.test(j.name)) ||
-      jobs.find(j => j.name === "prepare") ||
-      jobs[0];
-
-    if (job && job.name === "bootstrap") {
-      updateBackgroundProcessing(item.id, {
-        stage: "failed",
-        statusText: "Previous test run did not process the meeting audio."
-      });
-      if (meetingFolders?.meeting?.id === item.id) {
-        ensureRetryButton();
-        if (retryButton) {
-          retryButton.classList.remove("hidden");
-          retryButton.disabled = false;
-          retryButton.textContent = "START PROCESSING";
-        }
-        showRecoveredProcessingUI(
-          "Audio is ready. The earlier GitHub run was a test only; actual processing has not started."
-        );
-      }
-      return;
-    }
+      jobs.find(j => j.name === "prepare") || jobs[0];
 
     const steps = job?.steps || [];
-    const step = name => steps.find(x => x.name === name);
-    let current = {
-      key: "checking",
-      pct: 8,
-      label: "Checking meeting and processor access"
-    };
-
-    if (/^prepare/.test(job?.name || "")) {
-      if (step("Discover duration and dynamic matrix")?.status === "in_progress") {
-        current = {key:"prepare",pct:25,label:"Preparing automatic 10-minute batches"};
-      } else if (step("Initialize processing status")?.status === "in_progress") {
-        current = {key:"upload",pct:15,label:"Meeting audio confirmed in Google Drive"};
-      }
-    } else if (/^parallel-batches/.test(job?.name || "")) {
-      current = {key:"whisper",pct:55,label:"Parallel Whisper + AI processing of 10-minute batches"};
-    } else if (/^finalize/.test(job?.name || "")) {
-      if (step("Final synthesis and MoM")?.status === "in_progress") {
-        current = {key:"summary",pct:84,label:"Compiling all batch evidence with final AI"};
-      } else if (step("Start local Ollama")?.status === "in_progress") {
-        current = {key:"summary",pct:82,label:"Starting final AI consolidation"};
-      } else {
-        current = {key:"mom",pct:94,label:"Validating evidence and building the final MoM"};
-      }
-    }
+    const activeStep = steps.find(s => s.status === "in_progress");
+    const runText = run.status === "queued"
+      ? "GitHub Run #" + item.runId + " is queued"
+      : "GitHub Run #" + item.runId + " is running";
+    const jobText = job?.name ? " • " + job.name : "";
+    const stepText = activeStep?.name ? " • " + activeStep.name : "";
 
     updateBackgroundProcessing(item.id, {
-      stage: current.key,
-      percent: current.pct,
-      statusText: current.label
+      statusText: runText + jobText + stepText
     });
 
     if (meetingFolders?.meeting?.id === item.id) {
+      const currentPercent = Number(item.percent || 5);
       showProcessingUI(
-        current.key,
-        current.pct,
-        current.key === "parallel" ? "Batch progress is shown below" : "In progress…",
-        run.status === "queued" ? "Waiting for processor to start" : "Updating…"
+        driveStageToUi(item.stage || "dispatch"),
+        currentPercent,
+        "Live status from Google Drive",
+        run.status === "queued" ? "Waiting for GitHub runner" : "Waiting for processor update"
       );
-      if ($("processingStageText")) $("processingStageText").textContent = current.label;
+      if ($("processingStageText")) {
+        $("processingStageText").textContent = runText + jobText + stepText;
+      }
     }
 
     setTimeout(function(){ monitorWorkflowRun(item); }, 12000);
