@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# One production processor per meeting. Duplicate dispatches are serialized.
+concurrency:
+  group: meeting-mom-${{ github.event.client_payload.meeting_id || github.run_id }}
+  cancel-in-progress: false
+
 env:
   AI_MODEL: qwen3:4b-instruct-2507-q4_K_M
   AI_BATCH_MODEL: qwen3:1.7b-q4_K_M
@@ -15,6 +20,9 @@ env:
   AI_NUM_CTX: 8192
   AI_NUM_PREDICT: 1800
   AI_CHUNK_CHARS: 12000
+  BATCH_SECONDS: 600
+  MAX_BATCHES: 60
+  MAX_PARALLEL_BATCHES: 8
   OLLAMA_MODELS: /home/runner/.ollama/models
 
 jobs:
@@ -72,6 +80,10 @@ jobs:
       - run: pip install -r processor/requirements.txt
       - name: Validate meeting dispatch payload
         run: |
+          echo "Meeting ID: $MEETING_ID"
+          echo "Audio file ID: $AUDIO_FILE_ID"
+          echo "Audio folder ID: $AUDIO_FOLDER_ID"
+          echo "Meeting folder ID: $MEETING_FOLDER_ID"
           test -n "$MEETING_ID" || { echo "::error::MEETING_ID is missing from repository_dispatch payload."; exit 1; }
           test -n "$MEETING_FOLDER_ID" || { echo "::error::MEETING_FOLDER_ID is missing from repository_dispatch payload."; exit 1; }
           test -n "$AUDIO_FOLDER_ID" || { echo "::error::AUDIO_FOLDER_ID is missing from repository_dispatch payload."; exit 1; }
@@ -89,7 +101,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: ${{ fromJSON(env.MAX_PARALLEL_BATCHES) }}
       matrix:
         batch_index: ${{ fromJSON(needs.prepare.outputs.matrix_json) }}
     env:
