@@ -1615,12 +1615,12 @@ async function monitorDriveProcessingStatus(item) {
         (batchProgress.activeBreakdown ? " • " + batchProgress.activeBreakdown : "");
     updateBackgroundProcessing(item.id, {
       percent: batchProgress.percent,
-      stage: batchProgress.completed === batchProgress.total ? "summary" : "whisper",
+      stage: batchProgress.completed === batchProgress.total ? "ai" : "parallel",
       statusText: label
     });
     if (meetingFolders?.meeting?.id === item.id) {
       showProcessingUI(
-        batchProgress.completed === batchProgress.total ? "summary" : "whisper",
+        batchProgress.completed === batchProgress.total ? "ai" : "parallel",
         batchProgress.percent,
         batchProgress.failed ? "Review failed batch status" : (batchProgress.total - batchProgress.completed) + " batch(es) remaining",
         "Parallel processing: " + batchProgress.completed + "/" + batchProgress.total + " batches complete"
