@@ -20,6 +20,8 @@ let mediaRecorder = null;
 let mediaStream = null;
 let recordedChunks = [];
 let isRecording = false;
+let isStoppingRecording = false;
+let recordingStopAt = null;
 let pendingProcessingMeeting = null;
 let backgroundProcessing = JSON.parse(localStorage.getItem("meeting_mom_processing_queue") || "[]");
 // User-removed queued meetings must never be reattached to a later GitHub run.
@@ -119,57 +121,49 @@ function renderBackgroundProcessing() {
   const card = $("backgroundProcessingCard");
   const list = $("backgroundProcessingList");
   if (!card || !list) return;
-  if (!backgroundProcessing.length) {
-    card.classList.add("hidden");
-    list.innerHTML = "";
-    return;
+  const visible = backgroundProcessing.filter(item => String(item.registryStatus || "").toUpperCase() !== "DELETED");
+  if (!visible.length) {
+    card.classList.add("hidden"); list.innerHTML = ""; return;
   }
-
   card.classList.remove("hidden");
-  list.innerHTML = backgroundProcessing.map(item => {
-    const title = escapeHtml(item.title || "Meeting");
-    const statusText = escapeHtml(item.statusText || "Processing request sent");
-    const time = item.created_at ? new Date(item.created_at).toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}) : "";
-    const canRestart =
-      item.stage === "failed" ||
-      statusText === "Processing failed" ||
-      statusText === "Waiting to start processing" ||
-      statusText === "Previous test run did not process the meeting audio.";
-
-    return '<div class="background-row">' +
-      '<div><b>' + title + '</b><div class="muted small">' + time + '</div></div>' +
-      '<div class="background-status">' +
-        '<div>' + statusText + '</div>' +
-        '<details class="processing-ids">' +
-          '<summary>Verified Processing IDs</summary>' +
-          '<div class="processing-id-line"><b>Meeting ID:</b> ' + escapeHtml(item.id || "unavailable") + '</div>' +
-          '<div class="processing-id-line"><b>Audio File ID:</b> ' + escapeHtml(item.audioFileId || "unavailable") + '</div>' +
-          '<div class="processing-id-line"><b>Audio Folder ID:</b> ' + escapeHtml(item.audioFolderId || "unavailable") + '</div>' +
-          '<div class="processing-id-line"><b>Meeting Folder ID:</b> ' + escapeHtml(item.meetingFolderId || "unavailable") + '</div>' +
-        '</details>' +
-        '<div class="background-actions">' +
-          (canRestart
-            ? '<button type="button" class="secondary mini background-retry" data-meeting-id="' + escapeHtml(item.id) + '">RESTART PROCESSING</button>'
-            : '') +
-          '<button type="button" class="secondary mini background-clear" data-meeting-id="' + escapeHtml(item.id) + '">' +
-            (item.runId && item.stage !== "failed" && item.stage !== "complete" ? "STOP & DELETE" : "DELETE") +
-          '</button>' +
-        '</div>' +
-      '</div>' +
-      '</div>';
+  list.innerHTML = visible.map(item => {
+    const title=escapeHtml(item.title||"Meeting");
+    const statusText=escapeHtml(item.statusText||item.registryStatus||"Checking status…");
+    const time=item.created_at?new Date(item.created_at).toLocaleString("en-IN",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}):"";
+    const st=String(item.registryStatus||item.stage||"").toUpperCase();
+    const active=["PROCESSING","QUEUED","RUNNING","ANALYZING","TRANSCRIBING","DOWNLOADING","CONVERTING","TRANSLATING","SUMMARIZING","GENERATING_MOM","UPLOADING"].includes(st);
+    const paused=st==="PAUSED", failed=st==="FAILED"||item.stage==="failed", completed=st==="COMPLETED"||item.stage==="complete";
+    let actions="";
+    if(active){actions+='<button type="button" class="secondary mini background-pause" data-meeting-id="'+escapeHtml(item.id)+'">PAUSE</button>';}
+    if(paused){actions+='<button type="button" class="secondary mini background-resume" data-meeting-id="'+escapeHtml(item.id)+'">RESUME</button>';}
+    if(paused||failed||completed||active||st==="CREATED"){actions+='<button type="button" class="secondary mini background-rerun" data-meeting-id="'+escapeHtml(item.id)+'">RE-RUN</button>';}
+    actions+='<button type="button" class="danger mini background-delete" data-meeting-id="'+escapeHtml(item.id)+'">DELETE</button>';
+    return '<div class="background-row"><div><b>'+title+'</b><div class="muted small">'+time+'</div></div><div class="background-status"><div><b>'+statusText+'</b>'+(item.percent!==undefined?' · '+Math.round(Number(item.percent)||0)+'%':'')+'</div><details class="processing-ids"><summary>Verified Processing IDs</summary><div class="processing-id-line"><b>Meeting ID:</b> '+escapeHtml(item.id||"unavailable")+'</div><div class="processing-id-line"><b>Audio File ID:</b> '+escapeHtml(item.audioFileId||"unavailable")+'</div><div class="processing-id-line"><b>Audio Folder ID:</b> '+escapeHtml(item.audioFolderId||"unavailable")+'</div><div class="processing-id-line"><b>Meeting Folder ID:</b> '+escapeHtml(item.meetingFolderId||"unavailable")+'</div>'+(item.runId?'<div class="processing-id-line"><b>GitHub Run ID:</b> '+escapeHtml(String(item.runId))+'</div>':'')+'</details><div class="background-actions">'+actions+'</div></div></div>';
   }).join("");
+  list.querySelectorAll(".background-pause").forEach(b=>b.addEventListener("click",()=>controlBackgroundMeeting(b.dataset.meetingId,"pause",b)));
+  list.querySelectorAll(".background-resume").forEach(b=>b.addEventListener("click",()=>controlBackgroundMeeting(b.dataset.meetingId,"resume",b)));
+  list.querySelectorAll(".background-rerun").forEach(b=>b.addEventListener("click",()=>controlBackgroundMeeting(b.dataset.meetingId,"rerun",b)));
+  list.querySelectorAll(".background-delete").forEach(b=>b.addEventListener("click",()=>controlBackgroundMeeting(b.dataset.meetingId,"delete",b)));
+}
 
-  list.querySelectorAll(".background-retry").forEach(function(button) {
-    button.addEventListener("click", function() {
-      restartBackgroundMeeting(button.getAttribute("data-meeting-id"), button);
-    });
-  });
+async function gatewayPost(payload) {
+  const response=await fetch(CONFIG.gateway,{method:"POST",mode:"cors",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify(payload)});
+  let data=null; try{data=await response.json();}catch(_){}
+  if(!response.ok||!data?.success) throw new Error(data?.message||data?.error||"Gateway request failed");
+  return data;
+}
 
-  list.querySelectorAll(".background-clear").forEach(function(button) {
-    button.addEventListener("click", function() {
-      clearBackgroundMeeting(button.getAttribute("data-meeting-id"));
-    });
-  });
+async function controlBackgroundMeeting(id,action,button) {
+  const item=backgroundProcessing.find(x=>x.id===id); if(!item)return;
+  if(action==="delete"&&!confirm("Remove this meeting from the active Meeting MoM list? Google Drive audio and existing results will be preserved."))return;
+  if(button){button.disabled=true;button.textContent=action==="delete"?"DELETING…":action==="pause"?"PAUSING…":action==="resume"?"RESUMING…":"RE-RUNNING…";}
+  try{
+    const payload={action:action==="pause"?"pause_processing":action==="resume"?"resume_processing":action==="rerun"?"rerun_processing":"delete_meeting",meeting_id:id,meeting_folder_id:item.meetingFolderId,audio_folder_id:item.audioFolderId,audio_file_id:item.audioFileId,run_id:item.runId?String(item.runId):""};
+    const result=await gatewayPost(payload);
+    if(action==="delete"){backgroundProcessing=backgroundProcessing.filter(x=>x.id!==id);saveBackgroundProcessingQueue();renderBackgroundProcessing();status("Meeting removed from the active UI. Google Drive files and results were preserved.","success");return;}
+    updateBackgroundProcessing(id,{registryStatus:result.status||"PROCESSING",statusText:action==="pause"?"Paused — existing results preserved":action==="resume"?"Resuming processing":"Re-run requested",stage:action==="pause"?"paused":"checking",percent:action==="pause"?Number(item.percent||0):0,runId:""});
+    setTimeout(()=>syncRegistryMeetings(),1200);
+  }catch(err){if(button)button.disabled=false;status("Meeting control failed: "+err.message,"error");}
 }
 
 async function requestProcessingCancellation(item) {
@@ -581,57 +575,7 @@ async function loadBackgroundMeetingSnapshot(item) {
   };
 }
 
-async function restartBackgroundMeeting(id, button) {
-  const item = backgroundProcessing.find(function(x) {
-    return x.id === id;
-  });
-
-  if (!item) {
-    status("The previous meeting could not be found in the processing list.", "error");
-    return;
-  }
-
-  if (item.stage === "complete") {
-    status("This meeting has already completed processing.", "success");
-    return;
-  }
-
-  if (button) {
-    button.disabled = true;
-    button.textContent = "STARTING...";
-  }
-
-  try {
-    status("Recovering the previous meeting from Google Drive...", "");
-    const snapshot = await loadBackgroundMeetingSnapshot(item);
-
-    updateBackgroundProcessing(id, {
-      statusText: "Restarting processing",
-      stage: "checking",
-      percent: 5,
-      runId: ""
-    });
-
-    await notifyProcessingStarted(snapshot, {backgroundOnly: true});
-
-    status(
-      "Previous meeting processing has been restarted. The existing audio will not be uploaded again.",
-      "success"
-    );
-  } catch (err) {
-    updateBackgroundProcessing(id, {
-      statusText: "Waiting to start processing",
-      stage: "failed"
-    });
-
-    if (button) {
-      button.disabled = false;
-      button.textContent = "RESTART PROCESSING";
-    }
-
-    status("Could not restart the previous meeting: " + err.message, "error");
-  }
-}
+async function restartBackgroundMeeting(id,button){return controlBackgroundMeeting(id,"rerun",button);}
 
 async function retryProcessing() {
   if (!meetingFolders?.meeting?.id || !meetingFolders?.audio?.id) {
@@ -663,6 +607,24 @@ async function retryProcessing() {
   }
 }
 
+async function syncRegistryMeetings() {
+  try {
+    const response=await fetch(CONFIG.gateway+"?action=meetings&limit=100");
+    const data=await response.json();
+    if(!data?.success||!Array.isArray(data.meetings))throw new Error(data?.message||"Meeting registry unavailable");
+    data.meetings.forEach(m=>{
+      if(!m?.meeting_id||String(m.status).toUpperCase()==="DELETED")return;
+      const existing=backgroundProcessing.find(x=>x.id===m.meeting_id);
+      addBackgroundProcessing({meeting:{id:m.meeting_id,name:m.meeting_title||"Meeting"},audio:{id:m.audio_folder_id},audioFile:{id:m.audio_file_id}},m.status||"Registered",{
+        meetingFolderId:m.meeting_folder_id,audioFolderId:m.audio_folder_id,audioFileId:m.audio_file_id,
+        percent:existing?.percent||0,runId:existing?.runId||"",stage:existing?.stage||"checking"
+      });
+      updateBackgroundProcessing(m.meeting_id,{registryStatus:String(m.status||"").toUpperCase(),statusText:String(m.status||"REGISTERED"),created_at:m.created_at||existing?.created_at||new Date().toISOString(),updated_at:m.updated_at||"",errorCode:m.error_code||"",errorMessage:m.error_message||""});
+    });
+    renderBackgroundProcessing();
+  }catch(err){console.warn("Meeting registry sync failed:",err);}
+}
+
 function initGoogle() {
   if (!window.google?.accounts?.oauth2) {
     setTimeout(initGoogle, 300);
@@ -686,12 +648,12 @@ function initGoogle() {
       $("meetingCard").classList.remove("hidden");
       $("date").value = $("date").value || todayISO();
       renderBackgroundProcessing();
+      await syncRegistryMeetings();
       backgroundProcessing
-        .filter(item => item && item.stage !== "complete" && item.stage !== "failed")
+        .filter(item => item && String(item.registryStatus || "").toUpperCase() !== "DELETED")
         .forEach(item => {
           monitorDriveProcessingStatus(item);
           if (item.runId) monitorWorkflowRun(item);
-          else findAndMonitorLatestRun(item, item.created_at || new Date().toISOString());
         });
       let restored = false;
       try {
@@ -1258,148 +1220,76 @@ function getRecordingMimeType() {
 }
 
 async function startMeeting() {
-  if (isRecording) return;
-  try {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error("This browser does not support microphone recording. Use Chrome or Edge on HTTPS.");
-    }
-    await createMeetingWorkspace();
-    await uploadReferenceDocuments();
-    await updateMeetingMetadata();
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      }
-    });
-
-    const mimeType = getRecordingMimeType();
-    mediaRecorder = mimeType
-      ? new MediaRecorder(mediaStream, {mimeType})
-      : new MediaRecorder(mediaStream);
-
-    recordedChunks = [];
-    mediaRecorder.ondataavailable = event => {
-      if (event.data && event.data.size > 0) recordedChunks.push(event.data);
-    };
-
-    mediaRecorder.start(1000);
-    isRecording = true;
-    startedAt = Date.now();
-    $("startTime").value = new Date().toTimeString().slice(0,5);
-    $("startBtn").classList.add("hidden");
-    $("stopBtn").classList.remove("hidden");
-    $("recordingDot")?.classList.remove("hidden");
-    $("recordingState") && ($("recordingState").textContent = "Recording live — speak normally");
-    $("timer").textContent = "00:00:00";
-    timerHandle = setInterval(() => {
-      $("timer").textContent = formatTime(Date.now() - startedAt);
-    }, 250);
-    status("Microphone recording started. Noise suppression and echo cancellation are enabled.", "success");
-  } catch (err) {
-    if (mediaStream) {
-      mediaStream.getTracks().forEach(track => track.stop());
-      mediaStream = null;
-    }
-    isRecording = false;
-    status(err.message || "Could not start microphone recording.", "error");
+  if(isRecording||isStoppingRecording)return;
+  try{
+    if(!navigator.mediaDevices?.getUserMedia)throw new Error("This browser does not support microphone recording. Use Chrome or Edge on HTTPS.");
+    await createMeetingWorkspace(); await uploadReferenceDocuments(); await updateMeetingMetadata();
+    mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    const mimeType=getRecordingMimeType();
+    mediaRecorder=mimeType?new MediaRecorder(mediaStream,{mimeType}):new MediaRecorder(mediaStream);
+    recordedChunks=[]; isStoppingRecording=false; recordingStopAt=null;
+    mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size>0)recordedChunks.push(e.data);};
+    mediaRecorder.onerror=e=>console.error("MediaRecorder error:",e.error);
+    mediaRecorder.start(1000); isRecording=true; startedAt=Date.now();
+    $("startTime").value=new Date(startedAt).toTimeString().slice(0,5);
+    $("startBtn").classList.add("hidden"); $("stopBtn").classList.remove("hidden"); $("stopBtn").disabled=false;
+    $("stopBtn").textContent="STOP & SAVE RECORDING"; $("recordingDot")?.classList.remove("hidden");
+    $("recordingState")&&($("recordingState").textContent="Recording live — speak normally"); $("timer").textContent="00:00:00";
+    clearInterval(timerHandle); timerHandle=setInterval(()=>{if(isRecording&&startedAt)$("timer").textContent=formatTime(Date.now()-startedAt);},250);
+    status("Microphone recording started. Noise suppression and echo cancellation are enabled.","success");
+  }catch(err){
+    if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
+    isRecording=false;isStoppingRecording=false;status(err.message||"Could not start microphone recording.","error");
   }
 }
 
 function stopRecorderAndBuildFile() {
-  return new Promise((resolve, reject) => {
-    if (!mediaRecorder) {
-      reject(new Error("No active recording was found."));
-      return;
-    }
-
-    mediaRecorder.onstop = () => {
-      try {
-        const mimeType = mediaRecorder.mimeType || "audio/webm";
-        const blob = new Blob(recordedChunks, {type:mimeType});
-        const extension = mimeType.includes("mp4") ? "m4a" : "webm";
-        const date = $("date").value || todayISO();
-        const safeTitle = cleanFilePart($("title").value || "Meeting Recording");
-        const file = new File(
-          [blob],
-          safeTitle + " - " + date + " - Recording." + extension,
-          {type:mimeType}
-        );
-        resolve(file);
-      } catch (err) {
-        reject(err);
-      }
+  return new Promise((resolve,reject)=>{
+    if(!mediaRecorder){reject(new Error("No active recording was found."));return;}
+    let settled=false;
+    const finish=()=>{
+      if(settled)return; settled=true;
+      try{
+        const mimeType=mediaRecorder.mimeType||"audio/webm"; const blob=new Blob(recordedChunks,{type:mimeType});
+        if(!blob.size)throw new Error("Recording stopped but no audio data was captured.");
+        const extension=mimeType.includes("mp4")?"m4a":"webm"; const date=$("date").value||todayISO();
+        const safeTitle=cleanFilePart($("title").value||"Meeting Recording");
+        resolve(new File([blob],safeTitle+" - "+date+" - Recording."+extension,{type:mimeType}));
+      }catch(err){reject(err);}
     };
-
-    mediaRecorder.onerror = event => {
-      reject(event.error || new Error("Browser recording failed."));
-    };
-
+    mediaRecorder.onstop=finish;
+    mediaRecorder.onerror=e=>{if(!settled)reject(e.error||new Error("Browser recording failed."));};
+    try{if(typeof mediaRecorder.requestData==="function")mediaRecorder.requestData();}catch(_){}
     mediaRecorder.stop();
+    setTimeout(()=>{if(!settled&&mediaRecorder?.state==="inactive")finish();},3000);
   });
 }
 
 async function stopMeeting() {
-  if (!isRecording) {
-    $("timer").textContent = "00:00:00";
-    return;
-  }
-
-  clearInterval(timerHandle);
-  timerHandle = null;
-  isRecording = false;
-
-  try {
-    $("stopBtn").disabled = true;
-    $("stopBtn").textContent = "SAVING...";
-    $("endTime").value = new Date().toTimeString().slice(0,5);
-
-    const file = await stopRecorderAndBuildFile();
-
-    // Preserve a local copy in the browser's Downloads folder before any
-    // network upload starts. If Drive upload fails, the local recording remains.
-    saveLocalRecordingBackup(file);
-
-    if (mediaStream) {
-      mediaStream.getTracks().forEach(track => track.stop());
-      mediaStream = null;
-    }
-
-    $("timer").textContent = formatTime(Date.now() - startedAt);
-
-    // The upload is the only blocking operation for starting another meeting.
-    await uploadAudio(file);
-    await updateMeetingMetadata();
-
-    const completedMeeting = meetingFolders;
-    pendingProcessingMeeting = completedMeeting;
-
-    // Audio is now safely in Drive. Prepare the browser immediately for Meeting 2.
-    prepareNextMeeting();
-
-    try {
-      await notifyProcessingStarted(completedMeeting);
-      addBackgroundProcessing(completedMeeting, "Processing request queued — background processing");
-      pendingProcessingMeeting = null;
-      status("Meeting 1 is queued for processing. READY FOR NEXT MEETING.", "success");
-    } catch (triggerErr) {
-      addBackgroundProcessing(completedMeeting, "Waiting to start processing");
-      status("Meeting 1 audio is safely stored. Processing could not be started automatically: " + triggerErr.message, "error");
-    }
-  } catch (err) {
-    if (mediaStream) {
-      mediaStream.getTracks().forEach(track => track.stop());
-      mediaStream = null;
-    }
-    setAudioControlsBusy(false);
-    status(err.message, "error");
-    $("stopBtn").classList.remove("hidden");
-  } finally {
-    $("stopBtn").disabled = false;
-    $("stopBtn").textContent = "STOP & SAVE";
+  if(!isRecording||isStoppingRecording)return;
+  isStoppingRecording=true; recordingStopAt=Date.now();
+  const finalDuration=Math.max(0,recordingStopAt-(startedAt||recordingStopAt));
+  clearInterval(timerHandle);timerHandle=null;isRecording=false;
+  $("timer").textContent=formatTime(finalDuration); $("endTime").value=new Date(recordingStopAt).toTimeString().slice(0,5);
+  $("stopBtn").disabled=true;$("stopBtn").textContent="SAVING...";
+  $("recordingState")&&($("recordingState").textContent="Stopping recording — saving final audio chunk…");
+  try{
+    const file=await stopRecorderAndBuildFile(); saveLocalRecordingBackup(file);
+    if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
+    $("recordingDot")?.classList.add("hidden");$("recordingState")&&($("recordingState").textContent="Recording saved — uploading to Google Drive…");
+    await uploadAudio(file);await updateMeetingMetadata();
+    const completedMeeting=meetingFolders;pendingProcessingMeeting=completedMeeting;prepareNextMeeting();
+    try{await notifyProcessingStarted(completedMeeting);addBackgroundProcessing(completedMeeting,"Processing request queued — background processing");pendingProcessingMeeting=null;status("Meeting recording stopped and saved. Processing queued. READY FOR NEXT MEETING.","success");}
+    catch(triggerErr){addBackgroundProcessing(completedMeeting,"Waiting to start processing");status("Recording is safely stored. Processing could not be started automatically: "+triggerErr.message,"error");}
+  }catch(err){
+    if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
+    $("recordingDot")?.classList.add("hidden");$("recordingState")&&($("recordingState").textContent="Recording stop failed — retry or use the local backup.");
+    setAudioControlsBusy(false);status(err.message,"error");
+  }finally{
+    isStoppingRecording=false;$("stopBtn").disabled=false;$("stopBtn").textContent="STOP & SAVE RECORDING";mediaRecorder=null;
   }
 }
+
 async function uploadSelectedAudio() {
   const file = $("audioFile").files[0];
   if (!file) {
