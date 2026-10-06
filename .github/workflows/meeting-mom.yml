@@ -1,5 +1,7 @@
 name: Meeting MoM Online
 
+run-name: Meeting MoM • ${{ github.event.client_payload.meeting_id || 'manual' }}
+
 on:
   workflow_dispatch:
   repository_dispatch:
@@ -92,7 +94,10 @@ jobs:
         run: python processor/scripts/process_meeting.py --stage init
       - name: Discover duration and dynamic matrix
         id: matrix
-        run: python processor/scripts/pipeline/parallel_batch.py --mode prepare
+        run: |
+          python processor/scripts/pipeline/parallel_batch.py --mode prepare
+          echo "Batch matrix prepared dynamically; max parallel workers = 8."
+
 
   parallel-batches:
     if: github.event_name == 'repository_dispatch'
