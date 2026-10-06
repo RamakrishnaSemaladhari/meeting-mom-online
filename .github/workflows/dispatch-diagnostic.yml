@@ -1,0 +1,29 @@
+name: Dispatch Receiver Diagnostic
+
+on:
+  repository_dispatch:
+    types: [meeting-ready]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify repository dispatch contract
+        env:
+          MEETING_ID: ${{ github.event.client_payload.meeting_id }}
+          MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
+          AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
+          AUDIO_FILE_ID: ${{ github.event.client_payload.audio_file_id }}
+        run: |
+          echo "repository_dispatch received by GitHub Actions."
+          test -n "$MEETING_ID" || { echo "::error::meeting_id missing"; exit 1; }
+          test -n "$MEETING_FOLDER_ID" || { echo "::error::meeting_folder_id missing"; exit 1; }
+          test -n "$AUDIO_FOLDER_ID" || { echo "::error::audio_folder_id missing"; exit 1; }
+          test -n "$AUDIO_FILE_ID" || { echo "::error::audio_file_id missing"; exit 1; }
+          echo "Dispatch contract: valid."
+          echo "Meeting ID: $MEETING_ID"
+          echo "All required Drive IDs: present (values intentionally not printed)."
