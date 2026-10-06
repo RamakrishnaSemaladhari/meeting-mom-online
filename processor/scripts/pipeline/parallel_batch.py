@@ -267,6 +267,44 @@ def batch_folder_name(index, start, end):
     return f"BATCH_{index:03d}_{ai_mod.fmt_ts(start).replace(':','-')}_{ai_mod.fmt_ts(end).replace(':','-')}"
 
 
+def batch_outputs_complete(store, batch_folder):
+    """A batch is resumable only when all authoritative worker artifacts exist and parse."""
+    required = ("Transcript.json", "Translation.json", "AI Evidence.json")
+    try:
+        files = {name: store.find_one(batch_folder, name) for name in required}
+        if not all(files.values()):
+            return False
+        for name in required:
+            json.loads(store.read_bytes(files[name]["id"]).decode("utf-8"))
+        status = store.find_one(batch_folder, "BATCH_STATUS.json")
+        return bool(status)
+    except Exception:
+        return False
+
+
+def save_batch_checkpoint(store, meeting_folder, index, total):
+    existing = store.find_one(meeting_folder, "PROCESSING_CHECKPOINT.json")
+    completed = []
+    if existing:
+        try:
+            data = json.loads(store.read_bytes(existing["id"]).decode("utf-8"))
+            completed = [int(x) for x in data.get("completed_batches", [])]
+        except Exception:
+            completed = []
+    if index not in completed:
+        completed.append(index)
+    completed = sorted(set(completed))
+    store.upsert_text(meeting_folder, "PROCESSING_CHECKPOINT.json", dump({
+        "meeting_id": env("MEETING_ID"),
+        "status": "PROCESSING" if len(completed) < total else "BATCHES_COMPLETE",
+        "stage": "parallel_batches",
+        "completed_batches": completed,
+        "batch_total": total,
+        "last_successful_batch": completed[-1] if completed else 0,
+        "updated_at": now()
+    }), JSON_MIME)
+
+
 def write_batch_status(store, batches_folder, index, total, state, message, start, end):
     payload = {
         "batch_index": index, "batch_total": total, "status": state,
@@ -300,6 +338,15 @@ def stage_worker():
     start = (index - 1) * BATCH_SECONDS
     end = min(start + BATCH_SECONDS, duration)
     batch_folder = store.ensure_folder(batches_folder, batch_folder_name(index, start, end))
+
+    # Resume is checkpoint-based: completed Drive batches are never recomputed.
+    # A fresh re-run explicitly ignores the checkpoint and rebuilds every batch.
+    if env("PROCESSING_MODE", "fresh").lower() == "resume" and batch_outputs_complete(store, batch_folder):
+        write_batch_status(store, batches_folder, index, total, "COMPLETED",
+                           f"Batch {index}/{total} already complete — checkpoint reused", start, end)
+        save_batch_checkpoint(store, meeting, index, total)
+        log(f"RESUME: batch {index}/{total} reused from Drive checkpoint")
+        return
 
     try:
         write_batch_status(store, batches_folder, index, total, "DOWNLOADING",
