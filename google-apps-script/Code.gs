@@ -355,7 +355,7 @@ function doPost(e) {
       case 'rerun_processing':
 
         result =
-          resumeProcessing_(body);
+          rerunProcessing_(body);
 
         break;
 
@@ -976,6 +976,8 @@ function startProcessing_(data) {
   }
 
 
+  writeProcessingMode_(meetingFolderId, clean_(data.processing_mode) || 'fresh');
+
   const start =
     new Date();
 
@@ -1141,10 +1143,46 @@ function resumeProcessing_(data) {
     meeting_id: meetingId,
     audio_file_id: clean_(data.audio_file_id || row['Audio File ID']),
     audio_folder_id: clean_(data.audio_folder_id || row['Audio Folder ID']),
-    meeting_folder_id: clean_(data.meeting_folder_id || row['Meeting Folder ID'])
+    meeting_folder_id: clean_(data.meeting_folder_id || row['Meeting Folder ID']),
+    processing_mode: 'resume'
   };
   if (!payload.audio_file_id) throw new Error('Audio File ID is required before processing can resume.');
+  writeProcessingMode_(payload.meeting_folder_id, 'resume');
   return startProcessing_(payload);
+}
+
+function rerunProcessing_(data) {
+  const meetingId = clean_(data.meeting_id);
+  if (!meetingId) throw new Error('meeting_id is required');
+  const rowNumber = findMeetingRow_(meetingId);
+  if (rowNumber < 2) throw new Error('Meeting not found: ' + meetingId);
+  const sheet = getRegistrySheet_();
+  const row = getRowObject_(sheet, rowNumber);
+  const payload = {
+    meeting_id: meetingId,
+    audio_file_id: clean_(data.audio_file_id || row['Audio File ID']),
+    audio_folder_id: clean_(data.audio_folder_id || row['Audio Folder ID']),
+    meeting_folder_id: clean_(data.meeting_folder_id || row['Meeting Folder ID']),
+    processing_mode: 'rerun'
+  };
+  if (!payload.audio_file_id) throw new Error('Audio File ID is required before processing can re-run.');
+  writeProcessingMode_(payload.meeting_folder_id, 'rerun');
+  return startProcessing_(payload);
+}
+
+function writeProcessingMode_(folderId, mode) {
+  if (!folderId) return;
+  const payload = JSON.stringify({
+    mode: mode || 'fresh',
+    updated_at: new Date().toISOString()
+  }, null, 2);
+  const folder = DriveApp.getFolderById(folderId);
+  const files = folder.getFilesByName('PROCESSING_CONTROL.json');
+  if (files.hasNext()) {
+    files.next().setContent(payload);
+  } else {
+    folder.createFile('PROCESSING_CONTROL.json', payload, MimeType.PLAIN_TEXT);
+  }
 }
 
 function deleteMeeting_(data) {
@@ -2445,7 +2483,10 @@ function dispatchToGitHub_(
         payload.meeting_folder_id,
 
       audio_file_id:
-        payload.audio_file_id
+        payload.audio_file_id,
+
+      processing_mode:
+        clean_(payload.processing_mode) || 'fresh'
 
     }
 
