@@ -552,6 +552,7 @@ def stage_finalize():
         "message": "Final AI consolidation complete. Validating evidence and preparing the final MoM.",
         "batch_index": total,
         "batch_total": total,
+        **github_run_fields(),
         "updated_at": now()
     }), JSON_MIME)
 
