@@ -276,6 +276,8 @@
     <div id="uploadBox" class="hidden">
       <div id="uploadText" class="status small">Preparing upload...</div>
       <div class="progress"><div id="uploadProgress"></div></div>
+      <div id="localBackupStatus" class="status small">Local backup: waiting for recorded audio...</div>
+      <a id="localBackupLink" class="filename-preview hidden" target="_blank" rel="noopener">Download local backup again</a>
       <div id="audioFileId" class="filename-preview">Audio File ID: —</div>
       <div id="meetingFolderId" class="filename-preview">Meeting Folder ID: —</div>
     </div>
@@ -371,7 +373,7 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=32"></script>
+<script src="app.js?v=33"></script>
 <script src="batch.js?v=2"></script>
 </body>
 </html>
