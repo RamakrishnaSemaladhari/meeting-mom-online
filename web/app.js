@@ -38,17 +38,18 @@ function status(message, kind="") {
   el.className = "status " + kind;
 }
 
-const PROCESS_STAGES = ["upload","dispatch","prepare","whisper","translation","ai","summary","mom","complete"];
+// These IDs deliberately mirror the visible HTML stages. The percentage is
+// supplied by authoritative Drive/GitHub state; this list only controls which
+// real stage is highlighted.
+const PROCESS_STAGES = ["checking","upload","split","parallel","ai","mom","complete"];
 const PROCESS_LABELS = {
-  upload: "Audio upload and Google Drive verification",
-  dispatch: "GitHub Actions dispatch verification",
-  prepare: "Processor preparation and batch discovery",
-  whisper: "Whisper transcription",
-  translation: "English translation",
-  ai: "AI evidence analysis",
-  summary: "Final AI consolidation and summarising",
+  checking: "Meeting request validated / GitHub Run verification",
+  upload: "Audio confirmed in Google Drive",
+  split: "Automatic 10-minute batch preparation",
+  parallel: "Live parallel Whisper + AI batch processing",
+  ai: "Final AI consolidation of all batch evidence",
   mom: "Evidence validation and final MoM",
-  complete: "Final report verified and ready"
+  complete: "Results ready and verified"
 };
 
 function showProcessingUI(stage="upload", percent=10, stageEta="Calculating…", totalEta="Calculating…") {
@@ -83,7 +84,7 @@ function showRecoveredProcessingUI(message) {
     const el = document.querySelector('.stage[data-stage="' + name + '"]');
     if (!el) return;
     el.classList.remove("done","active");
-    el.classList.toggle("active", name === "upload");
+    el.classList.toggle("active", name === "checking");
   });
   $("processingStageText").textContent = "Existing audio confirmed. No new upload is required.";
   $("processingStageEta").textContent = "Stage remaining: Checking processing status…";
@@ -1456,15 +1457,13 @@ function driveStageToUi(stage) {
   const s = String(stage || "").toUpperCase();
   if (s === "COMPLETED") return "complete";
   if (s === "FAILED" || s === "CANCELLED") return "mom";
-  if (s === "QUEUED") return "dispatch";
-  if (s === "SPLITTING") return "prepare";
-  if (s === "ANALYZING") return "ai";
-  if (s === "SUMMARIZING") return "summary";
+  if (s === "QUEUED" || s === "DISPATCHED") return "checking";
+  if (s === "SPLITTING") return "split";
+  if (s === "ANALYZING" || s === "TRANSCRIBING" || s === "TRANSLATING" ||
+      s === "DOWNLOADING" || s === "CONVERTING") return "parallel";
+  if (s === "SUMMARIZING") return "ai";
   if (s === "GENERATING_MOM" || s === "UPLOADING") return "mom";
-  if (s === "TRANSLATING") return "translation";
-  if (s === "TRANSCRIBING") return "whisper";
-  if (s === "CONVERTING" || s === "DOWNLOADING") return "prepare";
-  return "dispatch";
+  return "checking";
 }
 
 async function readParallelBatchProgress(item) {
