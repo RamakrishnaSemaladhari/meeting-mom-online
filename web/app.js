@@ -1201,6 +1201,37 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function saveLocalRecordingBackup(file) {
+  if (!file) return null;
+  const url = URL.createObjectURL(file);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = file.name;
+  link.style.display = "none";
+  document.body.appendChild(link);
+
+  try {
+    link.click();
+  } finally {
+    setTimeout(() => {
+      try { link.remove(); } catch (_) {}
+      try { URL.revokeObjectURL(url); } catch (_) {}
+    }, 60000);
+  }
+
+  const backupLink = $("localBackupLink");
+  if (backupLink) {
+    backupLink.href = url;
+    backupLink.download = file.name;
+    backupLink.textContent = "Local backup: " + file.name;
+    backupLink.classList.remove("hidden");
+  }
+  if ($("localBackupStatus")) {
+    $("localBackupStatus").textContent = "Local backup sent to Downloads. Drive upload will proceed now.";
+  }
+  return url;
+}
+
 function formatTime(ms) {
   const total=Math.floor(ms/1000), h=String(Math.floor(total/3600)).padStart(2,"0");
   const m=String(Math.floor(total%3600/60)).padStart(2,"0"), s=String(total%60).padStart(2,"0");
@@ -1315,6 +1346,10 @@ async function stopMeeting() {
     $("endTime").value = new Date().toTimeString().slice(0,5);
 
     const file = await stopRecorderAndBuildFile();
+
+    // Preserve a local copy in the browser's Downloads folder before any
+    // network upload starts. If Drive upload fails, the local recording remains.
+    saveLocalRecordingBackup(file);
 
     if (mediaStream) {
       mediaStream.getTracks().forEach(track => track.stop());
