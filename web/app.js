@@ -133,10 +133,12 @@ function renderBackgroundProcessing() {
     const st=String(item.registryStatus||item.stage||"").toUpperCase();
     const active=["PROCESSING","QUEUED","RUNNING","ANALYZING","TRANSCRIBING","DOWNLOADING","CONVERTING","TRANSLATING","SUMMARIZING","GENERATING_MOM","UPLOADING"].includes(st);
     const paused=st==="PAUSED", failed=st==="FAILED"||item.stage==="failed", completed=st==="COMPLETED"||item.stage==="complete";
+    const unattendedActive=active && !item.runId;
+    const recoverable=paused || unattendedActive || (st==="CREATED" && Number(item.percent||0)>0);
     let actions="";
     if(active){actions+='<button type="button" class="secondary mini background-pause" data-meeting-id="'+escapeHtml(item.id)+'">PAUSE</button>';}
-    if(paused){actions+='<button type="button" class="secondary mini background-resume" data-meeting-id="'+escapeHtml(item.id)+'">RESUME</button>';}
-    if(paused||failed||completed||active||st==="CREATED"){actions+='<button type="button" class="secondary mini background-rerun" data-meeting-id="'+escapeHtml(item.id)+'">RE-RUN</button>';}
+    if(paused||unattendedActive){actions+='<button type="button" class="secondary mini background-resume" data-meeting-id="'+escapeHtml(item.id)+'">RESUME</button>';}
+    if(paused||failed||completed||active||st==="CREATED"||recoverable){actions+='<button type="button" class="secondary mini background-rerun" data-meeting-id="'+escapeHtml(item.id)+'">RE-RUN</button>';}
     actions+='<button type="button" class="danger mini background-delete" data-meeting-id="'+escapeHtml(item.id)+'">DELETE</button>';
     return '<div class="background-row"><div><b>'+title+'</b><div class="muted small">'+time+'</div></div><div class="background-status"><div><b>'+statusText+'</b>'+(item.percent!==undefined?' · '+Math.round(Number(item.percent)||0)+'%':'')+'</div><details class="processing-ids"><summary>Verified Processing IDs</summary><div class="processing-id-line"><b>Meeting ID:</b> '+escapeHtml(item.id||"unavailable")+'</div><div class="processing-id-line"><b>Audio File ID:</b> '+escapeHtml(item.audioFileId||"unavailable")+'</div><div class="processing-id-line"><b>Audio Folder ID:</b> '+escapeHtml(item.audioFolderId||"unavailable")+'</div><div class="processing-id-line"><b>Meeting Folder ID:</b> '+escapeHtml(item.meetingFolderId||"unavailable")+'</div>'+(item.runId?'<div class="processing-id-line"><b>GitHub Run ID:</b> '+escapeHtml(String(item.runId))+'</div>':'')+'</details><div class="background-actions">'+actions+'</div></div></div>';
   }).join("");
