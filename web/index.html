@@ -53,7 +53,7 @@
 .time-row{display:flex;justify-content:space-between;font-size:12px;color:#6b7280;margin-top:8px}
 .processing-current{margin-top:10px;font-size:14px}.processing-label{font-weight:700}
 .eta-box{margin-top:10px;padding:10px 12px;border-radius:12px;background:#fff;border:1px solid #e5e7eb;font-size:13px;line-height:1.7;font-weight:600}
-.processing-note{margin-top:12px;font-size:13px;color:#4b5563}
+.processing-note{margin-top:12px;font-size:13px;color:#4b5563}.verified-panel{margin-top:12px;padding:12px;border:1px solid #e5e7eb;border-radius:14px;background:#fff}.verified-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.verified-item{padding:8px;border-radius:10px;background:#f8fafc;font-size:12px}.verified-ok{color:#065f46;font-weight:700}.verified-warn{color:#92400e;font-weight:700}.source-line{margin-top:8px;font-size:11px;color:#6b7280}.batch-grid{display:grid;gap:6px;margin-top:8px}.batch-item{display:flex;justify-content:space-between;gap:8px;padding:7px 9px;border-radius:9px;background:#f8fafc;font-size:12px}.batch-state{font-weight:700}
 .live-summary{margin-top:14px;padding:14px;border-radius:14px;background:#fff;border:1px solid #e5e7eb}
 .live-summary strong{display:block;margin-bottom:5px}
 .background-card{margin-top:16px;padding:16px;border:1px solid #dbe3ee;border-radius:16px;background:#fff}
@@ -270,7 +270,7 @@
         <div id="processingTotalEta">Total estimated remaining: Calculating…</div>
       </div>
       <div class="processing-note">Almost ready — you will see your summary here below.</div>
-      <div class="live-summary"><strong>AI Understanding Summary</strong><span id="processingSummaryHint">The summary will appear here when AI processing is complete.</span></div>
+      <div class="live-summary"><strong>AI Understanding Summary</strong><span id="processingSummaryHint">The summary will appear here when AI processing is complete.</span></div>\n      <div class="verified-panel">\n        <strong>Verified Processing Status</strong>\n        <div class="verified-grid">\n          <div class="verified-item" id="verifyDrive">Drive: checking…</div>\n          <div class="verified-item" id="verifyGithub">GitHub: checking…</div>\n          <div class="verified-item" id="verifyProcessor">Processor: checking…</div>\n          <div class="verified-item" id="verifyOutput">Output: checking…</div>\n        </div>\n        <div class="source-line" id="verifySource">Waiting for authoritative status sources…</div>\n        <div id="batchProgress" class="batch-grid"></div>\n      </div>
     </div>
 
     <div id="uploadBox" class="hidden">
@@ -369,7 +369,7 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=30"></script>
+<script src="app.js?v=31"></script>
 <script src="batch.js?v=2"></script>
 </body>
 </html>
