@@ -147,10 +147,17 @@ function renderBackgroundProcessing() {
 }
 
 async function gatewayPost(payload) {
-  const response=await fetch(CONFIG.gateway,{method:"POST",mode:"cors",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify(payload)});
-  let data=null; try{data=await response.json();}catch(_){}
-  if(!response.ok||!data?.success) throw new Error(data?.message||data?.error||"Gateway request failed");
-  return data;
+  // Apps Script web apps can reject browser CORS preflight. The request body
+  // is intentionally sent as text/plain so it remains a simple no-cors request.
+  // The registry is the authoritative confirmation channel and is polled after
+  // each control operation.
+  await fetch(CONFIG.gateway, {
+    method:"POST",
+    mode:"no-cors",
+    headers:{"Content-Type":"text/plain;charset=UTF-8"},
+    body:JSON.stringify(payload)
+  });
+  return {success:true,status:"REQUESTED"};
 }
 
 async function controlBackgroundMeeting(id,action,button) {
