@@ -336,6 +336,38 @@ function doPost(e) {
         break;
 
 
+      case 'pause_processing':
+
+        result =
+          pauseProcessing_(body);
+
+        break;
+
+
+      case 'resume_processing':
+
+        result =
+          resumeProcessing_(body);
+
+        break;
+
+
+      case 'rerun_processing':
+
+        result =
+          resumeProcessing_(body);
+
+        break;
+
+
+      case 'delete_meeting':
+
+        result =
+          deleteMeeting_(body);
+
+        break;
+
+
       case 'update_processing':
 
         result =
@@ -1076,6 +1108,76 @@ function startProcessing_(data) {
       now_()
 
   };
+}
+
+
+/************************************************************
+ * MEETING CONTROL ACTIONS
+ ************************************************************/
+
+function pauseProcessing_(data) {
+  const meetingId = clean_(data.meeting_id);
+  if (!meetingId) throw new Error('meeting_id is required');
+  const rowNumber = findMeetingRow_(meetingId);
+  if (rowNumber < 2) throw new Error('Meeting not found: ' + meetingId);
+  const sheet = getRegistrySheet_();
+  const runId = clean_(data.run_id);
+  if (runId) cancelGitHubRun_(runId);
+  setCellByHeader_(sheet, rowNumber, 'Status', 'PAUSED');
+  setCellByHeader_(sheet, rowNumber, 'Error Code', '');
+  setCellByHeader_(sheet, rowNumber, 'Error Message', '');
+  setCellByHeader_(sheet, rowNumber, 'Updated At', new Date());
+  return {success:true, meeting_id:meetingId, status:'PAUSED', run_id:runId, timestamp:now_()};
+}
+
+function resumeProcessing_(data) {
+  const meetingId = clean_(data.meeting_id);
+  if (!meetingId) throw new Error('meeting_id is required');
+  const rowNumber = findMeetingRow_(meetingId);
+  if (rowNumber < 2) throw new Error('Meeting not found: ' + meetingId);
+  const sheet = getRegistrySheet_();
+  const row = getRowObject_(sheet, rowNumber);
+  const payload = {
+    meeting_id: meetingId,
+    audio_file_id: clean_(data.audio_file_id || row['Audio File ID']),
+    audio_folder_id: clean_(data.audio_folder_id || row['Audio Folder ID']),
+    meeting_folder_id: clean_(data.meeting_folder_id || row['Meeting Folder ID'])
+  };
+  if (!payload.audio_file_id) throw new Error('Audio File ID is required before processing can resume.');
+  return startProcessing_(payload);
+}
+
+function deleteMeeting_(data) {
+  const meetingId = clean_(data.meeting_id);
+  if (!meetingId) throw new Error('meeting_id is required');
+  const rowNumber = findMeetingRow_(meetingId);
+  if (rowNumber < 2) throw new Error('Meeting not found: ' + meetingId);
+  const sheet = getRegistrySheet_();
+  const runId = clean_(data.run_id);
+  if (runId) {
+    try { cancelGitHubRun_(runId); } catch (_) {}
+  }
+  setCellByHeader_(sheet, rowNumber, 'Status', 'DELETED');
+  setCellByHeader_(sheet, rowNumber, 'Updated At', new Date());
+  return {success:true, meeting_id:meetingId, status:'DELETED', drive_preserved:true, timestamp:now_()};
+}
+
+function cancelGitHubRun_(runId) {
+  const token = PropertiesService.getScriptProperties().getProperty(CONFIG.GITHUB_TOKEN_PROPERTY);
+  if (!token) throw new Error('GITHUB_TOKEN is not configured in Script Properties.');
+  const url = 'https://api.github.com/repos/' + CONFIG.GITHUB_REPO + '/actions/runs/' + encodeURIComponent(String(runId)) + '/cancel';
+  const response = UrlFetchApp.fetch(url, {
+    method:'post',
+    headers:{
+      Authorization:'Bearer ' + token,
+      Accept:'application/vnd.github+json',
+      'X-GitHub-Api-Version':'2022-11-28'
+    },
+    muteHttpExceptions:true
+  });
+  const code = response.getResponseCode();
+  if (code < 200 || code >= 300) throw new Error('GitHub run cancellation failed (' + code + '): ' + response.getContentText());
+  return true;
 }
 
 
