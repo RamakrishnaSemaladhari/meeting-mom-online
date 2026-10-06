@@ -38,13 +38,15 @@ function status(message, kind="") {
 
 const PROCESS_STAGES = ["upload","dispatch","prepare","whisper","translation","ai","summary","mom","complete"];
 const PROCESS_LABELS = {
-  checking: "Checking your existing meeting and audio",
-  upload: "Audio confirmed in Google Drive",
-  split: "Splitting long meeting into 10-minute batches",
-  parallel: "Parallel Whisper + AI processing of batches",
-  ai: "AI consolidation & evidence validation",
-  mom: "MoM preparation & validation",
-  complete: "Results ready"
+  upload: "Audio upload and Google Drive verification",
+  dispatch: "GitHub Actions dispatch verification",
+  prepare: "Processor preparation and batch discovery",
+  whisper: "Whisper transcription",
+  translation: "English translation",
+  ai: "AI evidence analysis",
+  summary: "Final AI consolidation and summarising",
+  mom: "Evidence validation and final MoM",
+  complete: "Final report verified and ready"
 };
 
 function showProcessingUI(stage="upload", percent=10, stageEta="Calculating…", totalEta="Calculating…") {
