@@ -1558,7 +1558,8 @@ async function monitorDriveProcessingStatus(item) {
     }
   }
 
-  const batchProgress = await readParallelBatchProgress(item);\n  renderVerifiedStatus(item, control, data, batchProgress);
+  const batchProgress = await readParallelBatchProgress(item);
+  renderVerifiedStatus(item, control, data, batchProgress);
   if (batchProgress && item.stage !== "complete" && item.stage !== "failed") {
     const label = batchProgress.failed
       ? "Parallel batches: " + batchProgress.completed + "/" + batchProgress.total + " complete; " + batchProgress.failed + " failed"
