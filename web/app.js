@@ -728,13 +728,48 @@ async function connectGoogle() {
   }
 }
 
-async function driveRequest(url, options={}) {
-  const headers = Object.assign({}, options.headers || {}, {Authorization:"Bearer "+accessToken});
-  const response = await fetch(url, Object.assign({}, options, {headers}));
+let driveTokenRefreshPromise = null;
+
+function refreshDriveAccessToken() {
+  if (!tokenClient) return Promise.reject(new Error("Google authorization is not initialized."));
+  if (driveTokenRefreshPromise) return driveTokenRefreshPromise;
+  driveTokenRefreshPromise = new Promise((resolve, reject) => {
+    const previousCallback = tokenClient.callback;
+    tokenClient.callback = function(response) {
+      tokenClient.callback = previousCallback;
+      driveTokenRefreshPromise = null;
+      if (response && response.access_token) {
+        accessToken = response.access_token;
+        sessionStorage.setItem("meeting_mom_google_connected","1");
+        resolve(response.access_token);
+      } else {
+        reject(new Error("Google Drive authorization expired. Please reconnect Google Drive." + (response?.error ? " (" + response.error + ")" : "")));
+      }
+    };
+    try { tokenClient.requestAccessToken({prompt:""}); }
+    catch (err) {
+      tokenClient.callback = previousCallback;
+      driveTokenRefreshPromise = null;
+      reject(err);
+    }
+  });
+}
+
+async function driveRequest(url, options={}, retryOn401=true) {
+  if (!accessToken) await refreshDriveAccessToken();
+  const makeRequest = async () => {
+    const headers = Object.assign({}, options.headers || {}, {Authorization:"Bearer "+accessToken});
+    return fetch(url, Object.assign({}, options, {headers}));
+  };
+  let response = await makeRequest();
+  if (response.status === 401 && retryOn401) {
+    await refreshDriveAccessToken();
+    response = await makeRequest();
+  }
   if (!response.ok) {
     let detail = "";
     try { detail = await response.text(); } catch (_) {}
-    throw new Error("Drive request failed ("+response.status+"): "+detail.slice(0,180));
+    throw new Error("Drive request failed ("+response.status+"): "+detail.slice(0,300));
   }
   return response;
 }
@@ -884,6 +919,8 @@ function showRecoveredAudio(audioFile) {
   if (!audioFile) return;
   const box = $("uploadBox");
   box.classList.remove("hidden");
+  if ($("audioFileId")) $("audioFileId").textContent = "Audio File ID: " + (audioFile.id || "unavailable");
+  if ($("meetingFolderId")) $("meetingFolderId").textContent = "Meeting Folder ID: " + (meetingFolders?.meeting?.id || "unavailable");
   $("uploadText").innerHTML =
     'Recovered audio: <b>' + escapeHtml(audioFile.name) + '</b>' +
     (audioFile.webViewLink
@@ -1063,7 +1100,7 @@ async function uploadAudio(file) {
 
   const mime = file.type || "application/octet-stream";
   const initResponse = await driveRequest(
-    "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,mimeType,size,createdTime,modifiedTime,webViewLink",
     {
       method:"POST",
       headers:{
@@ -1086,11 +1123,24 @@ async function uploadAudio(file) {
     let response = await fetch(sessionUrl,{
       method:"PUT",
       headers:{
+        "Authorization":"Bearer "+accessToken,
         "Content-Length":String(chunk.size),
         "Content-Range":"bytes "+start+"-"+(end-1)+"/"+file.size
       },
       body:chunk
     });
+    if (response.status === 401) {
+      await refreshDriveAccessToken();
+      response = await fetch(sessionUrl,{
+        method:"PUT",
+        headers:{
+          "Authorization":"Bearer "+accessToken,
+          "Content-Length":String(chunk.size),
+          "Content-Range":"bytes "+start+"-"+(end-1)+"/"+file.size
+        },
+        body:chunk
+      });
+    }
 
     if (response.status === 308) {
       const range = response.headers.get("Range");
@@ -1104,7 +1154,11 @@ async function uploadAudio(file) {
       const uploaded = await response.json();
       meetingFolders.audioFile = uploaded;
       $("uploadProgress").style.width = "100%";
-      $("uploadText").textContent = "Audio uploaded to AUDIO folder.";
+      if ($("audioFileId")) $("audioFileId").textContent = "Audio File ID: " + (uploaded.id || "unavailable");
+      if ($("meetingFolderId")) $("meetingFolderId").textContent = "Meeting Folder ID: " + (meetingFolders.meeting?.id || "unavailable");
+      $("uploadText").textContent = uploaded.id
+        ? "Audio uploaded and verified in Google Drive. File ID is ready for processing."
+        : "Audio uploaded to AUDIO folder.";
       audioUploaded = true;
       persistMeetingState();
       ensureRetryButton();
