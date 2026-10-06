@@ -140,6 +140,13 @@ function renderBackgroundProcessing() {
       '<div><b>' + title + '</b><div class="muted small">' + time + '</div></div>' +
       '<div class="background-status">' +
         '<div>' + statusText + '</div>' +
+        '<details class="processing-ids">' +
+          '<summary>Verified Processing IDs</summary>' +
+          '<div class="processing-id-line"><b>Meeting ID:</b> ' + escapeHtml(item.id || "unavailable") + '</div>' +
+          '<div class="processing-id-line"><b>Audio File ID:</b> ' + escapeHtml(item.audioFileId || "unavailable") + '</div>' +
+          '<div class="processing-id-line"><b>Audio Folder ID:</b> ' + escapeHtml(item.audioFolderId || "unavailable") + '</div>' +
+          '<div class="processing-id-line"><b>Meeting Folder ID:</b> ' + escapeHtml(item.meetingFolderId || "unavailable") + '</div>' +
+        '</details>' +
         '<div class="background-actions">' +
           (canRestart
             ? '<button type="button" class="secondary mini background-retry" data-meeting-id="' + escapeHtml(item.id) + '">RESTART PROCESSING</button>'
@@ -223,7 +230,10 @@ function addBackgroundProcessing(meeting, statusText, extra) {
     title: meeting.meeting.name || "Meeting",
     statusText: statusText || "Processing request sent",
     created_at: existing && existing.created_at ? existing.created_at : new Date().toISOString(),
-    meetingFolderId: meeting.meeting.id,
+    meetingFolderId: extra.meetingFolderId || meeting.meeting.id,
+    audioFolderId: extra.audioFolderId || (meeting.audio && meeting.audio.id ? meeting.audio.id : (existing && existing.audioFolderId ? existing.audioFolderId : "")),
+    audioFileId: extra.audioFileId || (meeting.audioFile && meeting.audioFile.id ? meeting.audioFile.id : (existing && existing.audioFileId ? existing.audioFileId : "")),
+    metadataFileId: extra.metadataFileId || (meeting.metadata && meeting.metadata.id ? meeting.metadata.id : (existing && existing.metadataFileId ? existing.metadataFileId : "")),
     aiFolderId: meeting.ai && meeting.ai.id ? meeting.ai.id : (existing && existing.aiFolderId ? existing.aiFolderId : ""),
     momFolderId: meeting.mom && meeting.mom.id ? meeting.mom.id : (existing && existing.momFolderId ? existing.momFolderId : ""),
     runId: extra.runId || (existing && existing.runId ? existing.runId : ""),
@@ -1749,7 +1759,11 @@ async function notifyProcessingStarted(snapshot, options) {
 
   const item = addBackgroundProcessing(snapshot, "Control tower dispatch sent — waiting for verified GitHub run", {
     stage: "checking",
-    percent: 5
+    percent: 5,
+    meetingFolderId: snapshot.meeting.id,
+    audioFolderId: snapshot.audio.id,
+    audioFileId: snapshot.audioFile.id,
+    metadataFileId: snapshot.metadata ? snapshot.metadata.id : ""
   });
 
   if (!options.backgroundOnly) {
