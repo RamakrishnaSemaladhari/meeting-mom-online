@@ -3648,124 +3648,1657 @@ function formatDuration_(
 }
 
 
+
 /************************************************************
- * MANUAL TESTS
+ * MANUAL TESTS / PRODUCTION DIAGNOSTICS
+ *
+ * TEST_01 through TEST_05 are NON-DESTRUCTIVE.
+ *
+ * TEST_06_REAL_DISPATCH sends a REAL repository_dispatch
+ * and therefore starts a REAL GitHub Actions processing run.
+ *
+ * TEST_07 and TEST_08 inspect GitHub after dispatch.
  ************************************************************/
 
-/*
- * TEST 1
+
+/************************************************************
+ * DEBUG LOGGER
+ ************************************************************/
+
+function DEBUG_log_(label, data) {
+
+  Logger.log(
+    '\n==============================\n' +
+    label +
+    '\n==============================\n' +
+    JSON.stringify(
+      data,
+      null,
+      2
+    )
+  );
+
+  return data;
+}
+
+
+/************************************************************
+ * TEST 01
  *
- * Spreadsheet + Sheet + Headers + Drive.
- */
+ * Apps Script gateway configuration.
+ *
+ * NON-DESTRUCTIVE
+ ************************************************************/
+
+function TEST_01_gatewayConfig() {
+
+  const props =
+    PropertiesService
+      .getScriptProperties();
+
+  const token =
+    props.getProperty(
+      CONFIG.GITHUB_TOKEN_PROPERTY
+    );
+
+  const result = {
+
+    success:
+      true,
+
+    repository:
+      CONFIG.GITHUB_REPO,
+
+    dispatch_url:
+      CONFIG.GITHUB_DISPATCH_URL,
+
+    event_type:
+      CONFIG.GITHUB_EVENT_TYPE,
+
+    spreadsheet_id:
+      CONFIG.REGISTRY_SPREADSHEET_ID,
+
+    sheet_name:
+      CONFIG.REGISTRY_SHEET_NAME,
+
+    timezone:
+      CONFIG.TIMEZONE,
+
+    github_token_configured:
+      !!token,
+
+    github_token_length:
+      token
+        ? token.length
+        : 0,
+
+    timestamp:
+      now_()
+
+  };
+
+  return DEBUG_log_(
+    'TEST 01 - GATEWAY CONFIG',
+    result
+  );
+}
+
+
+/************************************************************
+ * TEST 02
+ *
+ * Spreadsheet + Sheet + 32 registry headers.
+ *
+ * NON-DESTRUCTIVE
+ ************************************************************/
+
+function TEST_02_registry() {
+
+  const spreadsheet =
+    getRegistrySpreadsheet_();
+
+  const sheet =
+    getRegistrySheet_();
+
+  ensureHeaders_(
+    sheet
+  );
+
+  const actualHeaders =
+    sheet
+      .getRange(
+        1,
+        1,
+        1,
+        HEADERS.length
+      )
+      .getValues()[0];
+
+  const result = {
+
+    success:
+      true,
+
+    spreadsheet_id:
+      spreadsheet.getId(),
+
+    spreadsheet_name:
+      spreadsheet.getName(),
+
+    sheet_name:
+      sheet.getName(),
+
+    last_row:
+      sheet.getLastRow(),
+
+    last_column:
+      sheet.getLastColumn(),
+
+    expected_header_count:
+      HEADERS.length,
+
+    actual_header_count:
+      actualHeaders.length,
+
+    headers_match:
+      JSON.stringify(
+        actualHeaders
+      ) ===
+      JSON.stringify(
+        HEADERS
+      ),
+
+    headers:
+      actualHeaders,
+
+    timestamp:
+      now_()
+
+  };
+
+  return DEBUG_log_(
+    'TEST 02 - REGISTRY',
+    result
+  );
+}
+
+
+/************************************************************
+ * TEST 03
+ *
+ * Validate the newest Meeting Register row and
+ * the three Drive containers + audio file.
+ *
+ * NON-DESTRUCTIVE
+ ************************************************************/
+
+function TEST_03_latestMeetingAndDrive() {
+
+  const sheet =
+    getRegistrySheet_();
+
+  const lastRow =
+    sheet.getLastRow();
+
+  if (lastRow < 2) {
+
+    return DEBUG_log_(
+      'TEST 03 - NO MEETING',
+      {
+        success:
+          false,
+
+        message:
+          'Meeting Register contains no meeting rows.'
+      }
+    );
+  }
+
+  const rowNumber =
+    lastRow;
+
+  const row =
+    getRowObject_(
+      sheet,
+      rowNumber
+    );
+
+  const meetingId =
+    clean_(
+      row['Meeting ID']
+    );
+
+  const audioFileId =
+    clean_(
+      row['Audio File ID']
+    );
+
+  const audioFolderId =
+    clean_(
+      row['Audio Folder ID']
+    );
+
+  const meetingFolderId =
+    clean_(
+      row['Meeting Folder ID']
+    );
+
+  const result = {
+
+    success:
+      true,
+
+    row:
+      rowNumber,
+
+    meeting_id:
+      meetingId,
+
+    meeting_title:
+      clean_(
+        row['Meeting Title']
+      ),
+
+    status:
+      clean_(
+        row['Status']
+      ),
+
+    audio_file_id:
+      audioFileId,
+
+    audio_folder_id:
+      audioFolderId,
+
+    meeting_folder_id:
+      meetingFolderId,
+
+    audio_file_exists:
+      false,
+
+    audio_folder_exists:
+      false,
+
+    meeting_folder_exists:
+      false,
+
+    audio_file_name:
+      '',
+
+    audio_folder_name:
+      '',
+
+    meeting_folder_name:
+      ''
+
+  };
+
+
+  if (audioFileId) {
+
+    try {
+
+      const file =
+        DriveApp.getFileById(
+          audioFileId
+        );
+
+      result.audio_file_exists =
+        true;
+
+      result.audio_file_name =
+        file.getName();
+
+      result.audio_file_size =
+        file.getSize();
+
+      result.audio_file_mime =
+        file.getMimeType();
+
+    } catch (err) {
+
+      result.audio_file_error =
+        err.message;
+
+    }
+
+  }
+
+
+  if (audioFolderId) {
+
+    try {
+
+      const folder =
+        DriveApp.getFolderById(
+          audioFolderId
+        );
+
+      result.audio_folder_exists =
+        true;
+
+      result.audio_folder_name =
+        folder.getName();
+
+    } catch (err) {
+
+      result.audio_folder_error =
+        err.message;
+
+    }
+
+  }
+
+
+  if (meetingFolderId) {
+
+    try {
+
+      const folder =
+        DriveApp.getFolderById(
+          meetingFolderId
+        );
+
+      result.meeting_folder_exists =
+        true;
+
+      result.meeting_folder_name =
+        folder.getName();
+
+    } catch (err) {
+
+      result.meeting_folder_error =
+        err.message;
+
+    }
+
+  }
+
+
+  result.ids_complete =
+    !!(
+      meetingId &&
+      audioFileId &&
+      audioFolderId &&
+      meetingFolderId
+    );
+
+  result.drive_validation =
+    (
+      result.audio_file_exists &&
+      result.audio_folder_exists &&
+      result.meeting_folder_exists
+    );
+
+  result.ready_for_processing =
+    (
+      result.ids_complete &&
+      result.drive_validation
+    );
+
+  result.timestamp =
+    now_();
+
+
+  return DEBUG_log_(
+    'TEST 03 - LATEST MEETING + DRIVE',
+    result
+  );
+}
+
+
+/************************************************************
+ * TEST 04
+ *
+ * Validate exactly what startProcessing_ needs.
+ *
+ * NON-DESTRUCTIVE
+ ************************************************************/
+
+function TEST_04_startProcessingPrerequisites() {
+
+  const sheet =
+    getRegistrySheet_();
+
+  const lastRow =
+    sheet.getLastRow();
+
+  if (lastRow < 2) {
+
+    return DEBUG_log_(
+      'TEST 04 - NO MEETING',
+      {
+        success:
+          false,
+
+        ready_for_startProcessing:
+          false,
+
+        message:
+          'No meeting exists in the registry.'
+      }
+    );
+  }
+
+  const row =
+    getRowObject_(
+      sheet,
+      lastRow
+    );
+
+  const checks = {
+
+    meeting_id:
+      !!clean_(
+        row['Meeting ID']
+      ),
+
+    meeting_title:
+      !!clean_(
+        row['Meeting Title']
+      ),
+
+    meeting_initiator:
+      !!clean_(
+        row['Meeting Initiator']
+      ),
+
+    audio_file_id:
+      !!clean_(
+        row['Audio File ID']
+      ),
+
+    audio_folder_id:
+      !!clean_(
+        row['Audio Folder ID']
+      ),
+
+    meeting_folder_id:
+      !!clean_(
+        row['Meeting Folder ID']
+      )
+
+  };
+
+  const ready =
+    Object.keys(
+      checks
+    )
+    .every(
+      function(key) {
+
+        return (
+          checks[key] ===
+          true
+        );
+
+      }
+    );
+
+  const result = {
+
+    success:
+      ready,
+
+    ready_for_startProcessing:
+      ready,
+
+    row:
+      lastRow,
+
+    meeting_id:
+      clean_(
+        row['Meeting ID']
+      ),
+
+    audio_file_id:
+      clean_(
+        row['Audio File ID']
+      ),
+
+    audio_folder_id:
+      clean_(
+        row['Audio Folder ID']
+      ),
+
+    meeting_folder_id:
+      clean_(
+        row['Meeting Folder ID']
+      ),
+
+    checks:
+      checks,
+
+    timestamp:
+      now_()
+
+  };
+
+  return DEBUG_log_(
+    'TEST 04 - START PROCESSING PREREQUISITES',
+    result
+  );
+}
+
+
+/************************************************************
+ * TEST 05
+ *
+ * GitHub API authentication + repository access.
+ *
+ * NON-DESTRUCTIVE
+ ************************************************************/
+
+function TEST_05_githubConnection() {
+
+  const token =
+    PropertiesService
+      .getScriptProperties()
+      .getProperty(
+        CONFIG.GITHUB_TOKEN_PROPERTY
+      );
+
+  if (!token) {
+
+    return DEBUG_log_(
+      'TEST 05 - GITHUB CONNECTION',
+      {
+        success:
+          false,
+
+        error:
+          'GITHUB_TOKEN_MISSING',
+
+        message:
+          'GITHUB_TOKEN is not configured in Script Properties.'
+      }
+    );
+  }
+
+  const url =
+    'https://api.github.com/repos/' +
+    CONFIG.GITHUB_REPO;
+
+  const response =
+    UrlFetchApp.fetch(
+      url,
+      {
+
+        method:
+          'get',
+
+        headers: {
+
+          Authorization:
+            'Bearer ' +
+            token,
+
+          Accept:
+            'application/vnd.github+json',
+
+          'X-GitHub-Api-Version':
+            '2022-11-28'
+
+        },
+
+        muteHttpExceptions:
+          true
+
+      }
+    );
+
+  const code =
+    response.getResponseCode();
+
+  const responseText =
+    response.getContentText();
+
+  let data = {};
+
+  try {
+
+    data =
+      JSON.parse(
+        responseText
+      );
+
+  } catch (err) {
+
+    data = {
+
+      raw:
+        responseText
+
+    };
+
+  }
+
+  const result = {
+
+    success:
+      code >= 200 &&
+      code < 300,
+
+    http_status:
+      code,
+
+    repository:
+      CONFIG.GITHUB_REPO,
+
+    repository_name:
+      data.name ||
+      '',
+
+    repository_private:
+      data.private,
+
+    message:
+      (
+        code >= 200 &&
+        code < 300
+      )
+        ? 'GitHub API reachable and repository accessible.'
+        : responseText,
+
+    timestamp:
+      now_()
+
+  };
+
+  return DEBUG_log_(
+    'TEST 05 - GITHUB CONNECTION',
+    result
+  );
+}
+
+
+/************************************************************
+ * TEST 06
+ *
+ * REAL PRODUCTION DISPATCH.
+ *
+ * WARNING:
+ * THIS STARTS A REAL GITHUB ACTIONS RUN.
+ *
+ * This uses the newest registry meeting and therefore
+ * exercises dispatchToGitHub_() with the real four IDs.
+ ************************************************************/
+
+function TEST_06_REAL_DISPATCH() {
+
+  const sheet =
+    getRegistrySheet_();
+
+  const lastRow =
+    sheet.getLastRow();
+
+  if (lastRow < 2) {
+
+    throw new Error(
+      'No meeting exists in Meeting Register.'
+    );
+  }
+
+  const row =
+    getRowObject_(
+      sheet,
+      lastRow
+    );
+
+  const payload = {
+
+    meeting_id:
+      clean_(
+        row['Meeting ID']
+      ),
+
+    audio_folder_id:
+      clean_(
+        row['Audio Folder ID']
+      ),
+
+    meeting_folder_id:
+      clean_(
+        row['Meeting Folder ID']
+      ),
+
+    audio_file_id:
+      clean_(
+        row['Audio File ID']
+      )
+
+  };
+
+  if (
+    !payload.meeting_id ||
+    !payload.audio_file_id ||
+    !payload.audio_folder_id ||
+    !payload.meeting_folder_id
+  ) {
+
+    throw new Error(
+      'Latest meeting does not contain all four production IDs.'
+    );
+  }
+
+  const result =
+    dispatchToGitHub_(
+      payload
+    );
+
+  return DEBUG_log_(
+    'TEST 06 - REAL GITHUB DISPATCH',
+    {
+
+      success:
+        result.success,
+
+      dispatch_result:
+        result,
+
+      payload:
+        payload,
+
+      timestamp:
+        now_()
+
+    }
+  );
+}
+
+
+/************************************************************
+ * TEST 07
+ *
+ * Find the newest repository_dispatch workflow run.
+ *
+ * NON-DESTRUCTIVE
+ ************************************************************/
+
+function TEST_07_findLatestGitHubRun() {
+
+  const token =
+    PropertiesService
+      .getScriptProperties()
+      .getProperty(
+        CONFIG.GITHUB_TOKEN_PROPERTY
+      );
+
+  if (!token) {
+
+    throw new Error(
+      'GITHUB_TOKEN is missing.'
+    );
+  }
+
+  const url =
+    'https://api.github.com/repos/' +
+    CONFIG.GITHUB_REPO +
+    '/actions/workflows/meeting-mom.yml/runs' +
+    '?event=repository_dispatch' +
+    '&per_page=10';
+
+  const response =
+    UrlFetchApp.fetch(
+      url,
+      {
+
+        method:
+          'get',
+
+        headers: {
+
+          Authorization:
+            'Bearer ' +
+            token,
+
+          Accept:
+            'application/vnd.github+json',
+
+          'X-GitHub-Api-Version':
+            '2022-11-28'
+
+        },
+
+        muteHttpExceptions:
+          true
+
+      }
+    );
+
+  const code =
+    response.getResponseCode();
+
+  const responseText =
+    response.getContentText();
+
+  let data = {};
+
+  try {
+
+    data =
+      JSON.parse(
+        responseText
+      );
+
+  } catch (err) {
+
+    data = {
+
+      raw:
+        responseText
+
+    };
+
+  }
+
+  if (
+    code < 200 ||
+    code >= 300
+  ) {
+
+    return DEBUG_log_(
+      'TEST 07 - GITHUB RUN QUERY FAILED',
+      {
+
+        success:
+          false,
+
+        http_status:
+          code,
+
+        response:
+          responseText,
+
+        timestamp:
+          now_()
+
+      }
+    );
+  }
+
+  const runs =
+    data.workflow_runs ||
+    [];
+
+  const latest =
+    runs.length
+      ? runs[0]
+      : null;
+
+  const result = {
+
+    success:
+      !!latest,
+
+    run_detected:
+      !!latest,
+
+    total_runs:
+      runs.length,
+
+    latest_run:
+      latest
+        ? {
+
+            id:
+              latest.id,
+
+            run_number:
+              latest.run_number,
+
+            status:
+              latest.status,
+
+            conclusion:
+              latest.conclusion,
+
+            event:
+              latest.event,
+
+            branch:
+              latest.head_branch,
+
+            created_at:
+              latest.created_at,
+
+            updated_at:
+              latest.updated_at,
+
+            html_url:
+              latest.html_url
+
+          }
+        : null,
+
+    timestamp:
+      now_()
+
+  };
+
+  return DEBUG_log_(
+    'TEST 07 - LATEST GITHUB RUN',
+    result
+  );
+}
+
+
+/************************************************************
+ * TEST 08
+ *
+ * Inspect the newest run's jobs.
+ *
+ * This identifies:
+ *   prepare
+ *   matrix / parallel workers
+ *   finalize
+ *
+ * NON-DESTRUCTIVE
+ ************************************************************/
+
+function TEST_08_githubJobs() {
+
+  const token =
+    PropertiesService
+      .getScriptProperties()
+      .getProperty(
+        CONFIG.GITHUB_TOKEN_PROPERTY
+      );
+
+  if (!token) {
+
+    throw new Error(
+      'GITHUB_TOKEN is missing.'
+    );
+  }
+
+  const runsUrl =
+    'https://api.github.com/repos/' +
+    CONFIG.GITHUB_REPO +
+    '/actions/workflows/meeting-mom.yml/runs' +
+    '?event=repository_dispatch' +
+    '&per_page=1';
+
+  const runsResponse =
+    UrlFetchApp.fetch(
+      runsUrl,
+      {
+
+        method:
+          'get',
+
+        headers: {
+
+          Authorization:
+            'Bearer ' +
+            token,
+
+          Accept:
+            'application/vnd.github+json',
+
+          'X-GitHub-Api-Version':
+            '2022-11-28'
+
+        },
+
+        muteHttpExceptions:
+          true
+
+      }
+    );
+
+  const runsCode =
+    runsResponse.getResponseCode();
+
+  if (
+    runsCode < 200 ||
+    runsCode >= 300
+  ) {
+
+    return DEBUG_log_(
+      'TEST 08 - RUN QUERY FAILED',
+      {
+
+        success:
+          false,
+
+        http_status:
+          runsCode,
+
+        response:
+          runsResponse.getContentText(),
+
+        timestamp:
+          now_()
+
+      }
+    );
+  }
+
+  const runsData =
+    JSON.parse(
+      runsResponse.getContentText()
+    );
+
+  const latest =
+    (
+      runsData.workflow_runs &&
+      runsData.workflow_runs.length
+    )
+      ? runsData.workflow_runs[0]
+      : null;
+
+  if (!latest) {
+
+    return DEBUG_log_(
+      'TEST 08 - NO RUN',
+      {
+
+        success:
+          false,
+
+        message:
+          'No repository_dispatch workflow run found yet.',
+
+        timestamp:
+          now_()
+
+      }
+    );
+  }
+
+  const jobsUrl =
+    'https://api.github.com/repos/' +
+    CONFIG.GITHUB_REPO +
+    '/actions/runs/' +
+    latest.id +
+    '/jobs?per_page=100';
+
+  const jobsResponse =
+    UrlFetchApp.fetch(
+      jobsUrl,
+      {
+
+        method:
+          'get',
+
+        headers: {
+
+          Authorization:
+            'Bearer ' +
+            token,
+
+          Accept:
+            'application/vnd.github+json',
+
+          'X-GitHub-Api-Version':
+            '2022-11-28'
+
+        },
+
+        muteHttpExceptions:
+          true
+
+      }
+    );
+
+  const jobsCode =
+    jobsResponse.getResponseCode();
+
+  const jobsText =
+    jobsResponse.getContentText();
+
+  if (
+    jobsCode < 200 ||
+    jobsCode >= 300
+  ) {
+
+    return DEBUG_log_(
+      'TEST 08 - JOB QUERY FAILED',
+      {
+
+        success:
+          false,
+
+        run_id:
+          latest.id,
+
+        http_status:
+          jobsCode,
+
+        response:
+          jobsText,
+
+        timestamp:
+          now_()
+
+      }
+    );
+  }
+
+  const jobsData =
+    JSON.parse(
+      jobsText
+    );
+
+  const jobs =
+    jobsData.jobs ||
+    [];
+
+  const simplified =
+    jobs.map(
+      function(job) {
+
+        return {
+
+          id:
+            job.id,
+
+          name:
+            job.name,
+
+          status:
+            job.status,
+
+          conclusion:
+            job.conclusion,
+
+          started_at:
+            job.started_at,
+
+          completed_at:
+            job.completed_at
+
+        };
+
+      }
+    );
+
+  const names =
+    simplified.map(
+      function(job) {
+
+        return String(
+          job.name
+        )
+        .toLowerCase();
+
+      }
+    );
+
+  const prepareDetected =
+    names.some(
+      function(name) {
+
+        return name.includes(
+          'prepare'
+        );
+
+      }
+    );
+
+  const parallelDetected =
+    names.some(
+      function(name) {
+
+        return (
+          name.includes('batch') ||
+          name.includes('parallel') ||
+          name.includes('worker')
+        );
+
+      }
+    );
+
+  const finalizeDetected =
+    names.some(
+      function(name) {
+
+        return (
+          name.includes('final')
+        );
+
+      }
+    );
+
+  const result = {
+
+    success:
+      true,
+
+    run_id:
+      latest.id,
+
+    run_number:
+      latest.run_number,
+
+    run_status:
+      latest.status,
+
+    run_conclusion:
+      latest.conclusion,
+
+    job_count:
+      simplified.length,
+
+    prepare_detected:
+      prepareDetected,
+
+    parallel_detected:
+      parallelDetected,
+
+    finalize_detected:
+      finalizeDetected,
+
+    jobs:
+      simplified,
+
+    timestamp:
+      now_()
+
+  };
+
+  return DEBUG_log_(
+    'TEST 08 - GITHUB JOBS',
+    result
+  );
+}
+
+
+/************************************************************
+ * TEST 09
+ *
+ * Single-screen production status.
+ *
+ * NON-DESTRUCTIVE
+ ************************************************************/
+
+function TEST_09_PRODUCTION_STATUS() {
+
+  const result = {
+
+    gateway:
+      false,
+
+    registry:
+      false,
+
+    meeting:
+      false,
+
+    audio:
+      false,
+
+    audio_folder:
+      false,
+
+    meeting_folder:
+      false,
+
+    github_token:
+      false,
+
+    github_run:
+      false,
+
+    prepare:
+      false,
+
+    parallel:
+      false,
+
+    finalize:
+      false,
+
+    ready_for_real_test:
+      false,
+
+    timestamp:
+      now_()
+
+  };
+
+
+  /*
+   * Gateway configuration.
+   */
+
+  result.gateway =
+    !!(
+      CONFIG.GITHUB_REPO &&
+      CONFIG.GITHUB_DISPATCH_URL &&
+      CONFIG.GITHUB_EVENT_TYPE &&
+      CONFIG.REGISTRY_SPREADSHEET_ID
+    );
+
+
+  /*
+   * Registry + latest meeting.
+   */
+
+  try {
+
+    const sheet =
+      getRegistrySheet_();
+
+    result.registry =
+      true;
+
+    const lastRow =
+      sheet.getLastRow();
+
+    if (lastRow >= 2) {
+
+      const row =
+        getRowObject_(
+          sheet,
+          lastRow
+        );
+
+      result.meeting =
+        !!clean_(
+          row['Meeting ID']
+        );
+
+      result.audio =
+        !!clean_(
+          row['Audio File ID']
+        );
+
+      result.audio_folder =
+        !!clean_(
+          row['Audio Folder ID']
+        );
+
+      result.meeting_folder =
+        !!clean_(
+          row['Meeting Folder ID']
+        );
+
+    }
+
+  } catch (err) {
+
+    result.registry_error =
+      err.message;
+
+  }
+
+
+  /*
+   * Token.
+   */
+
+  const token =
+    PropertiesService
+      .getScriptProperties()
+      .getProperty(
+        CONFIG.GITHUB_TOKEN_PROPERTY
+      );
+
+  result.github_token =
+    !!token;
+
+
+  /*
+   * Latest GitHub run and jobs.
+   */
+
+  if (token) {
+
+    try {
+
+      const runsUrl =
+        'https://api.github.com/repos/' +
+        CONFIG.GITHUB_REPO +
+        '/actions/workflows/meeting-mom.yml/runs' +
+        '?event=repository_dispatch' +
+        '&per_page=1';
+
+      const runsResponse =
+        UrlFetchApp.fetch(
+          runsUrl,
+          {
+
+            method:
+              'get',
+
+            headers: {
+
+              Authorization:
+                'Bearer ' +
+                token,
+
+              Accept:
+                'application/vnd.github+json',
+
+              'X-GitHub-Api-Version':
+                '2022-11-28'
+
+            },
+
+            muteHttpExceptions:
+              true
+
+          }
+        );
+
+      const runsCode =
+        runsResponse.getResponseCode();
+
+      if (
+        runsCode >= 200 &&
+        runsCode < 300
+      ) {
+
+        const runsData =
+          JSON.parse(
+            runsResponse.getContentText()
+          );
+
+        const latest =
+          (
+            runsData.workflow_runs &&
+            runsData.workflow_runs.length
+          )
+            ? runsData.workflow_runs[0]
+            : null;
+
+        if (latest) {
+
+          result.github_run =
+            true;
+
+          result.latest_run =
+            {
+
+              id:
+                latest.id,
+
+              run_number:
+                latest.run_number,
+
+              status:
+                latest.status,
+
+              conclusion:
+                latest.conclusion,
+
+              html_url:
+                latest.html_url
+
+            };
+
+
+          const jobsUrl =
+            'https://api.github.com/repos/' +
+            CONFIG.GITHUB_REPO +
+            '/actions/runs/' +
+            latest.id +
+            '/jobs?per_page=100';
+
+          const jobsResponse =
+            UrlFetchApp.fetch(
+              jobsUrl,
+              {
+
+                method:
+                  'get',
+
+                headers: {
+
+                  Authorization:
+                    'Bearer ' +
+                    token,
+
+                  Accept:
+                    'application/vnd.github+json',
+
+                  'X-GitHub-Api-Version':
+                    '2022-11-28'
+
+                },
+
+                muteHttpExceptions:
+                  true
+
+              }
+            );
+
+          if (
+            jobsResponse.getResponseCode() >= 200 &&
+            jobsResponse.getResponseCode() < 300
+          ) {
+
+            const jobsData =
+              JSON.parse(
+                jobsResponse.getContentText()
+              );
+
+            const jobs =
+              jobsData.jobs ||
+              [];
+
+            jobs.forEach(
+              function(job) {
+
+                const name =
+                  String(
+                    job.name
+                  )
+                  .toLowerCase();
+
+                if (
+                  name.includes(
+                    'prepare'
+                  )
+                ) {
+
+                  result.prepare =
+                    true;
+
+                }
+
+                if (
+                  name.includes('batch') ||
+                  name.includes('parallel') ||
+                  name.includes('worker')
+                ) {
+
+                  result.parallel =
+                    true;
+
+                }
+
+                if (
+                  name.includes(
+                    'final'
+                  )
+                ) {
+
+                  result.finalize =
+                    true;
+
+                }
+
+              }
+            );
+
+          }
+
+        }
+
+      }
+
+    } catch (err) {
+
+      result.github_error =
+        err.message;
+
+    }
+
+  }
+
+
+  result.ready_for_real_test =
+    (
+      result.gateway &&
+      result.registry &&
+      result.meeting &&
+      result.audio &&
+      result.audio_folder &&
+      result.meeting_folder &&
+      result.github_token
+    );
+
+
+  return DEBUG_log_(
+    'TEST 09 - PRODUCTION STATUS',
+    result
+  );
+}
+
+
+/************************************************************
+ * LEGACY SAFE TESTS
+ ************************************************************/
+
 function TEST_setup() {
 
   const result =
     setupMeetingSystem();
 
-
-  Logger.log(
-    JSON.stringify(
-      result,
-      null,
-      2
-    )
+  return DEBUG_log_(
+    'TEST_setup',
+    result
   );
-
-
-  return result;
 }
 
 
-/*
- * TEST 2
- *
- * Dashboard.
- */
 function TEST_dashboard() {
 
   const result =
     getDashboardStats_();
 
-
-  Logger.log(
-    JSON.stringify(
-      result,
-      null,
-      2
-    )
+  return DEBUG_log_(
+    'TEST_dashboard',
+    result
   );
-
-
-  return result;
 }
 
 
-/*
- * TEST 3
- *
- * Meeting listing.
- */
 function TEST_listMeetings() {
 
   const result =
     listMeetings_({
-      limit: 100
+      limit:
+        100
     });
 
-
-  Logger.log(
-    JSON.stringify(
-      result,
-      null,
-      2
-    )
+  return DEBUG_log_(
+    'TEST_listMeetings',
+    result
   );
-
-
-  return result;
-}
-
-
-/*
- * TEST 4
- *
- * GitHub dispatch.
- *
- * DO NOT RUN WITH DUMMY DATA.
- *
- * The real UI calls startProcessing_()
- * instead.
- */
-function TEST_githubDispatch() {
-
-  const result =
-    dispatchToGitHub_({
-
-      meeting_id:
-        'TEST-MEETING',
-
-      audio_folder_id:
-        '',
-
-      meeting_folder_id:
-        '',
-
-      audio_file_id:
-        ''
-
-    });
-
-
-  Logger.log(
-    JSON.stringify(
-      result,
-      null,
-      2
-    )
-  );
-
-
-  return result;
 }
 
 
