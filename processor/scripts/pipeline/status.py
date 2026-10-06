@@ -7,6 +7,7 @@ import datetime
 import json
 import re
 import time
+import os
 from pathlib import Path
 
 STATUS_FILE = "PROCESSING_STATUS.json"
@@ -45,7 +46,8 @@ class StatusReporter:
                 "meeting_id": meeting_id, "status": "QUEUED", "stage": "QUEUED",
                 "progress_percent": 0, "current_stage": "", "message": "", "started_at": now(),
                 "updated_at": now(), "completed_at": None,
-                "error_code": None, "error_message": None,\n                "github_run_id": os.environ.get("GITHUB_RUN_ID", ""),\n                "github_run_url": (os.environ.get("GITHUB_SERVER_URL", "https://github.com") + "/" + os.environ.get("GITHUB_REPOSITORY", "") + "/actions/runs/" + os.environ.get("GITHUB_RUN_ID", "")) if os.environ.get("GITHUB_RUN_ID") else "",
+                "error_code": None, "error_message": None,
+                "github_run_id": os.environ.get("GITHUB_RUN_ID", ""),\n                "github_run_url": (os.environ.get("GITHUB_SERVER_URL", "https://github.com") + "/" + os.environ.get("GITHUB_REPOSITORY", "") + "/actions/runs/" + os.environ.get("GITHUB_RUN_ID", "")) if os.environ.get("GITHUB_RUN_ID") else "",
             }
 
     def reset(self):
