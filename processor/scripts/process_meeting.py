@@ -242,7 +242,11 @@ def publish_ai_outputs(ctx, ai, validated):
 
 def stage_init(ctx):
     ctx.status.reset()
-    ctx.status.update("QUEUED", "Processing started on the GitHub runner", 0)
+    ctx.status.update(
+        "QUEUED",
+        "GitHub Actions Run #" + (env("GITHUB_RUN_ID") or "unknown") + " started; validating meeting payload.",
+        7
+    )
 
 
 def stage_whisper(ctx):
