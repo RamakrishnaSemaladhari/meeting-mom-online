@@ -1009,6 +1009,8 @@ function startProcessing_(data) {
   /*
    * Dispatch GitHub.
    */
+  const dispatchedAt = new Date();
+
   const githubResult =
     dispatchToGitHub_({
 
@@ -1022,7 +1024,10 @@ function startProcessing_(data) {
         meetingFolderId,
 
       audio_file_id:
-        audioFileId
+        audioFileId,
+
+      processing_mode:
+        clean_(data.processing_mode) || 'fresh'
 
     });
 
@@ -1085,6 +1090,13 @@ function startProcessing_(data) {
   }
 
 
+  const capturedRun = captureAndPersistGitHubRun_(
+    meetingId,
+    meetingFolderId,
+    dispatchedAt,
+    githubResult
+  );
+
   return {
 
     success: true,
@@ -1105,6 +1117,18 @@ function startProcessing_(data) {
 
     github_status:
       githubResult.status,
+
+    github_run_id:
+      capturedRun && capturedRun.id ? String(capturedRun.id) : '',
+
+    github_run_number:
+      capturedRun ? (capturedRun.run_number || '') : '',
+
+    github_run_status:
+      capturedRun ? (capturedRun.status || 'queued') : 'queued',
+
+    github_run_url:
+      capturedRun ? (capturedRun.html_url || '') : '',
 
     timestamp:
       now_()
@@ -2545,6 +2569,9 @@ function dispatchToGitHub_(
     code < 300
   ) {
 
+    const dispatchedAt = new Date();
+    const run = findGitHubRunForMeeting_(payload.meeting_id, dispatchedAt);
+
     return {
 
       success: true,
@@ -2553,10 +2580,33 @@ function dispatchToGitHub_(
         code,
 
       message:
-        'GitHub processing dispatched',
+        run && run.id
+          ? 'GitHub processing dispatched and exact run verified'
+          : 'GitHub processing dispatched; exact run is still being discovered',
 
       response:
-        text
+        text,
+
+      run_id:
+        run ? String(run.id) : '',
+
+      run_number:
+        run ? run.run_number : '',
+
+      run_status:
+        run ? run.status : 'queued',
+
+      run_conclusion:
+        run ? (run.conclusion || '') : '',
+
+      run_url:
+        run ? (run.html_url || '') : '',
+
+      run_created_at:
+        run ? (run.created_at || '') : '',
+
+      dispatched_at:
+        dispatchedAt.toISOString()
 
     };
   }
@@ -2577,6 +2627,148 @@ function dispatchToGitHub_(
       'GitHub dispatch failed'
 
   };
+}
+
+
+/************************************************************
+ * LIVE GITHUB RUN CAPTURE + AUTHORITATIVE CONTROL STATUS
+ *
+ * GitHub's repository_dispatch endpoint returns HTTP 204 and does not
+ * return the newly-created Actions run ID. We therefore query the
+ * workflow runs immediately after dispatch and match the run by the
+ * exact meeting ID embedded in run-name plus creation time.
+ ************************************************************/
+
+function findGitHubRunForMeeting_(meetingId, dispatchedAt) {
+
+  const token = PropertiesService.getScriptProperties().getProperty(CONFIG.GITHUB_TOKEN_PROPERTY);
+  if (!token || !meetingId) return null;
+
+  const url =
+    'https://api.github.com/repos/' +
+    CONFIG.GITHUB_REPO +
+    '/actions/workflows/meeting-mom.yml/runs?event=repository_dispatch&per_page=20';
+
+  const options = {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28'
+    },
+    muteHttpExceptions: true
+  };
+
+  const target = 'Meeting MoM • ' + String(meetingId);
+  const targetMs = dispatchedAt ? dispatchedAt.getTime() : Date.now();
+
+  // GitHub can take a few seconds to materialize a repository_dispatch run.
+  // Poll briefly rather than guessing the newest run.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      const response = UrlFetchApp.fetch(url, options);
+      const code = response.getResponseCode();
+      if (code >= 200 && code < 300) {
+        const data = JSON.parse(response.getContentText() || '{}');
+        const runs = data.workflow_runs || [];
+        const candidates = runs.filter(function(run) {
+          const createdMs = Date.parse(run.created_at || '') || 0;
+          const name = String(run.name || '');
+          const title = String(run.display_title || '');
+          return (name === target || name.indexOf(String(meetingId)) >= 0 || title.indexOf(String(meetingId)) >= 0)
+            && createdMs >= (targetMs - 15000);
+        });
+        if (candidates.length) {
+          candidates.sort(function(a, b) {
+            return (Date.parse(b.created_at || '') || 0) - (Date.parse(a.created_at || '') || 0);
+          });
+          return candidates[0];
+        }
+      }
+    } catch (_) {}
+    if (attempt < 7) Utilities.sleep(1500);
+  }
+
+  return null;
+}
+
+function writeControlStatus_(meetingFolderId, payload) {
+  if (!meetingFolderId) return;
+  const folder = DriveApp.getFolderById(meetingFolderId);
+  const text = JSON.stringify(payload, null, 2);
+  const files = folder.getFilesByName('CONTROL_STATUS.json');
+  if (files.hasNext()) {
+    files.next().setContent(text);
+  } else {
+    folder.createFile('CONTROL_STATUS.json', text, MimeType.PLAIN_TEXT);
+  }
+}
+
+function captureAndPersistGitHubRun_(meetingId, meetingFolderId, dispatchedAt, dispatchResult) {
+  const run = dispatchResult && dispatchResult.run_id
+    ? {
+        id: dispatchResult.run_id,
+        run_number: dispatchResult.run_number || '',
+        status: dispatchResult.run_status || 'queued',
+        conclusion: dispatchResult.run_conclusion || '',
+        html_url: dispatchResult.run_url || '',
+        created_at: dispatchResult.run_created_at || ''
+      }
+    : findGitHubRunForMeeting_(meetingId, dispatchedAt);
+
+  const now = now_();
+  const hasRun = !!(run && run.id);
+  const control = {
+    meeting_id: meetingId,
+    control_status: hasRun ? 'RUNNING' : 'DISPATCHED',
+    github: {
+      run_id: hasRun ? String(run.id) : '',
+      run_number: hasRun ? run.run_number : '',
+      status: hasRun ? (run.status || 'queued') : 'queued',
+      conclusion: hasRun ? (run.conclusion || '') : '',
+      run_url: hasRun ? (run.html_url || '') : '',
+      created_at: hasRun ? (run.created_at || '') : ''
+    },
+    processor: {
+      status: 'PROCESSING',
+      stage: hasRun ? 'QUEUED' : 'DISPATCHED',
+      progress_percent: hasRun ? 7 : 5,
+      message: hasRun
+        ? 'GitHub Actions Run #' + String(run.id) + ' verified. Waiting for processor status.'
+        : 'GitHub dispatch accepted. Waiting for exact Actions Run ID.'
+    },
+    dispatched_at: dispatchedAt ? dispatchedAt.toISOString() : now,
+    updated_at: now
+  };
+  writeControlStatus_(meetingFolderId, control);
+  return run;
+}
+
+function refreshMeetingRunStatus_(meetingId, meetingFolderId) {
+  const run = findGitHubRunForMeeting_(meetingId, new Date(Date.now() - 86400000));
+  if (!run) return null;
+  writeControlStatus_(meetingFolderId, {
+    meeting_id: meetingId,
+    control_status: run.status === 'completed' ? (run.conclusion === 'success' ? 'COMPLETED' : 'FAILED') : 'RUNNING',
+    github: {
+      run_id: String(run.id),
+      run_number: run.run_number || '',
+      status: run.status || '',
+      conclusion: run.conclusion || '',
+      run_url: run.html_url || '',
+      created_at: run.created_at || ''
+    },
+    processor: {
+      status: 'PROCESSING',
+      stage: run.status === 'completed' ? (run.conclusion === 'success' ? 'COMPLETED' : 'FAILED') : 'QUEUED',
+      progress_percent: run.status === 'completed' && run.conclusion === 'success' ? 100 : 7,
+      message: run.status === 'completed'
+        ? (run.conclusion === 'success' ? 'GitHub Actions run completed successfully.' : 'GitHub Actions run failed.')
+        : 'GitHub Actions run is active; Drive processor status will provide the live processing stage.'
+    },
+    updated_at: now_()
+  });
+  return run;
 }
 
 
