@@ -1,0 +1,23 @@
+name: Production regression checks
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile processor
+        run: python -m compileall -q processor
+      - name: JavaScript syntax
+        run: node --check web/app.js
+      - name: Production regression tests
+        run: python -m pytest -q processor/tests/test_production_hardening.py
