@@ -19,5 +19,7 @@ jobs:
         run: python -m compileall -q processor
       - name: JavaScript syntax
         run: node --check web/app.js
+      - name: Install test runner
+        run: python -m pip install pytest
       - name: Production regression tests
         run: python -m pytest -q processor/tests/test_production_hardening.py
