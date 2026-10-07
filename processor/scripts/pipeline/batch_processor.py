@@ -11,6 +11,12 @@ from .validation import validate
 
 BATCH_SECONDS = 600
 
+# Shared helpers used by the production parallel path.
+fmt_ts = ai_mod.fmt_ts
+
+def env(name, default=""):
+    return os.environ.get(name, default).strip()
+
 def _ffprobe_duration(path):
     try:
         proc = subprocess.run(
