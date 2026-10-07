@@ -12,8 +12,9 @@ FIELDS = "id,name,mimeType,size,createdTime,modifiedTime,parents,trashed"
 
 
 class DriveStore:
-    def __init__(self, service):
+    def __init__(self, service, auth_mode="oauth_user"):
         self.svc = service
+        self.auth_mode = auth_mode
 
     @classmethod
     def from_env(cls):
@@ -49,6 +50,36 @@ class DriveStore:
             scopes=SCOPES,
         )
         return cls(build("drive", "v3", credentials=creds, cache_discovery=False))
+
+    # ------------------------------------------------------------ preflight
+    @staticmethod
+    def explain_auth_error(exc):
+        text = str(exc)
+        low = text.lower()
+        if "invalid_grant" in low or "invalid_client" in low or "unauthorized_client" in low:
+            return "Google OAuth refresh token/client credentials are invalid or expired. Re-authorize the Drive OAuth client."
+        if "insufficient permission" in low or "insufficientpermissions" in low or "forbidden" in low:
+            return "The Google OAuth identity cannot access this Drive folder/file. Check sharing and Drive scope."
+        if "quota" in low or "rate limit" in low:
+            return "Google Drive quota or rate limit was reached. Retry after quota recovers."
+        return text
+
+    def identity(self):
+        try:
+            about = self.svc.about().get(fields="user(displayName,emailAddress,permissionId)").execute()
+            return about.get("user") or {}
+        except Exception as exc:
+            raise MomError("MOM-002", "Could not verify Google Drive identity: " + self.explain_auth_error(exc))
+
+    def write_probe(self, folder_id, label="preflight"):
+        try:
+            meta = self.svc.files().create(body={"name": f".mom_write_check_{label}", "parents":[folder_id]}, fields="id").execute()
+            probe_id = meta.get("id")
+            if probe_id:
+                self.svc.files().delete(fileId=probe_id).execute()
+            return True
+        except Exception as exc:
+            raise MomError("MOM-013", "Drive write preflight failed: " + self.explain_auth_error(exc))
 
     @staticmethod
     def _q(value):
