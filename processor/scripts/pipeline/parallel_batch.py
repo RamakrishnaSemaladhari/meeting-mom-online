@@ -19,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline.errors import MomError
 from pipeline.drive_store import DriveStore, select_audio
-from pipeline.status import now
+from pipeline.status import now, sanitize, StatusReporter
+from pipeline.speech_quality import MIN_CHARS, assess_audio, assess_transcript, audio_report_from_ffmpeg
 from pipeline import ai_understanding as ai_mod
 from pipeline.batch_processor import (
     _aggregate_batches,
@@ -95,10 +96,10 @@ def detected_language(data):
     return str(((data.get("result") or {}).get("language")) or "").lower()
 
 
-def whisper_json(wav, base, language):
+def whisper_json(wav, base, language, model=None):
     if not WHISPER.exists():
         raise MomError("MOM-005", f"Whisper executable not found at {WHISPER}.")
-    model = WHISPER_MODEL
+    model = Path(model) if model else WHISPER_MODEL
     if not model.exists() or model.stat().st_size == 0:
         raise MomError("MOM-006", f"Whisper model not found at {model}.")
     if not VAD_MODEL.exists() or VAD_MODEL.stat().st_size == 0:
@@ -124,6 +125,72 @@ def whisper_json(wav, base, language):
         return json.loads(out.read_text(encoding="utf-8"))
     except Exception as exc:
         raise MomError("MOM-005", f"Whisper JSON is malformed: {exc}")
+
+
+def batch_audio_health(wav):
+    """Level/silence/duration of one window. Returns (report, problems, warnings)."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-i", str(wav),
+             "-af", "volumedetect,silencedetect=noise=-40dB:d=1", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300)
+        report = audio_report_from_ffmpeg(proc.stderr)
+    except Exception as exc:
+        log(f"WARNING: audio health check could not run: {exc}")
+        return {}, [], []
+    problems, warnings = assess_audio(report)
+    log("Audio health: " + json.dumps(report))
+    return report, problems, warnings
+
+
+def transcribe_batch(wav, index, hint):
+    """Primary Whisper -> quality gate -> fallback Whisper."""
+    report, problems, warnings = batch_audio_health(wav)
+    if problems:
+        return None, [], {"status": "silent", "passed": False, "reason": " ".join(problems), "audio": report}
+    models = [("primary", WHISPER_MODEL)]
+    if FALLBACK_MODEL.exists() and FALLBACK_MODEL.stat().st_size > 0 and FALLBACK_MODEL != WHISPER_MODEL:
+        models.append(("fallback", FALLBACK_MODEL))
+    attempts = []
+    for label, model in models:
+        data = whisper_json(wav, WORK / f"transcript_{index:03d}_{label}", hint, model=model)
+        segments = ai_mod.segments_from_whisper(data)
+        verdict = assess_transcript(segments, None)
+        attempts.append({"label": label, "model": model.name, "passed": verdict["passed"],
+                         "problems": verdict["problems"], "metrics": verdict["metrics"]})
+        if verdict["passed"]:
+            return data, segments, {"status": "ok", "passed": True, "model_used": model.name,
+                                    "attempts": attempts, "audio": report, "warnings": warnings}
+    no_text = all(a["metrics"]["usable_characters"] < MIN_CHARS for a in attempts)
+    reasons = "; ".join(f'{a["model"]}: ' + ", ".join(a["problems"]) for a in attempts)
+    return None, [], {"status": "silent" if no_text else "rejected", "passed": False,
+                      "reason": reasons, "attempts": attempts, "audio": report}
+
+
+def empty_batch_ai(flag, index, start, end, batch_model):
+    evidence = {k: [] for k in ai_mod.OUTPUT_KEYS}
+    evidence.update({"executive_summary": "", "complete_conversation_summary": "", "review_flags": [flag],
+                     "translation_segments": [], "schema_version": ai_mod.SCHEMA_VERSION,
+                     "generated_with": {"ai_model": batch_model, "batch_ai_model": batch_model, "sections": 0},
+                     "batch": {"index": index, "start": ai_mod.fmt_ts(start), "end": ai_mod.fmt_ts(end)}})
+    return evidence
+
+
+def write_empty_batch(store, batch_folder, index, start, end, quality, batch_model):
+    note = ("No usable speech was detected in this 10-minute window (silence or very low audio)."
+            if quality["status"] == "silent" else
+            "The transcript for this window was discarded because it failed the quality check (repetition or garbled output). This window is NOT covered by the MoM; review the audio.")
+    flag = f"Window {index} ({ai_mod.fmt_ts(start)}-{ai_mod.fmt_ts(end)}): {note}"
+    meta = {"index": index, "start_seconds": start, "end_seconds": end}
+    store.upsert_text(batch_folder, "Original Transcript.txt", note + "\n")
+    store.upsert_text(batch_folder, "Transcript.json", dump({"transcription": [], "result": {"language": ""}, "_batch": meta, "_quality": quality}), JSON_MIME)
+    store.upsert_text(batch_folder, "English Translation.txt", note + "\n")
+    store.upsert_text(batch_folder, "Translation.json", dump({"transcription": [], "result": {"language": "en"}, "_quality": {"engine": "none"}}), JSON_MIME)
+    store.upsert_text(batch_folder, "Original + English Translation.txt", note + "\n")
+    store.upsert_text(batch_folder, "AI Evidence.json", dump(empty_batch_ai(flag, index, start, end, batch_model)), JSON_MIME)
+    store.upsert_text(batch_folder, "Complete Conversation Summary.txt", "")
+    store.upsert_text(batch_folder, "Executive Summary.txt", "")
+    return note
 
 
 def load_previous_context(store, meeting_folder, metadata):
@@ -278,17 +345,23 @@ def batch_folder_name(index, start, end):
     return f"BATCH_{index:03d}_{ai_mod.fmt_ts(start).replace(':','-')}_{ai_mod.fmt_ts(end).replace(':','-')}"
 
 
-def batch_outputs_complete(store, batch_folder):
-    """A batch is resumable only when all authoritative worker artifacts exist and parse."""
+def batch_outputs_complete(store, batch_folder, batches_folder=None, index=None):
+    """A batch is reusable only when artifacts parse and its worker reported COMPLETED."""
     required = ("Transcript.json", "Translation.json", "AI Evidence.json")
     try:
         files = {name: store.find_one(batch_folder, name) for name in required}
         if not all(files.values()):
             return False
-        for name in required:
-            json.loads(store.read_bytes(files[name]["id"]).decode("utf-8"))
-        status = store.find_one(batch_folder, "BATCH_STATUS.json")
-        return bool(status)
+        parsed = {name: json.loads(store.read_bytes(files[name]["id"]).decode("utf-8")) for name in required}
+        if (parsed["Transcript.json"].get("_quality") or {}).get("status") == "rejected":
+            return False
+        if batches_folder is not None and index is not None:
+            status_meta = store.find_one(batches_folder, f"BATCH_STATUS_{index:03d}.json")
+            if not status_meta:
+                return False
+            status = json.loads(store.read_bytes(status_meta["id"]).decode("utf-8"))
+            return str(status.get("status", "")).upper() == "COMPLETED"
+        return bool(store.find_one(batch_folder, "BATCH_STATUS.json"))
     except Exception:
         return False
 
@@ -316,11 +389,11 @@ def save_batch_checkpoint(store, meeting_folder, index, total):
     }), JSON_MIME)
 
 
-def write_batch_status(store, batches_folder, index, total, state, message, start, end):
+def write_batch_status(store, batches_folder, index, total, state, message, start, end, **extra):
     payload = {
         "batch_index": index, "batch_total": total, "status": state,
         "message": message, "start_seconds": start, "end_seconds": end,
-        "updated_at": now()
+        "updated_at": now(), **extra
     }
     store.upsert_text(batches_folder, f"BATCH_STATUS_{index:03d}.json", dump(payload), JSON_MIME)
 
@@ -343,8 +416,6 @@ def stage_worker():
     if index < 1 or total < 1 or not meeting or not audio_folder or not audio_id:
         raise MomError("MOM-002", "Parallel batch worker is missing meeting/audio/batch parameters.")
 
-    metadata = json.loads(store.read_bytes(store.find_one(meeting, "meeting_metadata.json")["id"]).decode("utf-8"))
-    folders = {f["name"]: f["id"] for f in store.list_children(meeting, folders=True)}
     batches_folder = store.ensure_folder(meeting, "BATCHES")
     start = (index - 1) * BATCH_SECONDS
     end = min(start + BATCH_SECONDS, duration)
@@ -352,7 +423,7 @@ def stage_worker():
 
     # Resume is checkpoint-based: completed Drive batches are never recomputed.
     # A fresh re-run explicitly ignores the checkpoint and rebuilds every batch.
-    if env("PROCESSING_MODE", "fresh").lower() == "resume" and batch_outputs_complete(store, batch_folder):
+    if env("PROCESSING_MODE", "fresh").lower() == "resume" and batch_outputs_complete(store, batch_folder, batches_folder, index):
         write_batch_status(store, batches_folder, index, total, "COMPLETED",
                            f"Batch {index}/{total} already complete — checkpoint reused", start, end)
         save_batch_checkpoint(store, meeting, index, total)
@@ -360,6 +431,11 @@ def stage_worker():
         return
 
     try:
+        metadata_file = store.find_one(meeting, "meeting_metadata.json")
+        if not metadata_file:
+            raise MomError("MOM-002", "meeting_metadata.json was not found in the meeting folder.")
+        metadata = json.loads(store.read_bytes(metadata_file["id"]).decode("utf-8"))
+
         write_batch_status(store, batches_folder, index, total, "DOWNLOADING",
                            "Downloading exact meeting audio", start, end)
         WORK.mkdir(parents=True, exist_ok=True)
@@ -377,20 +453,26 @@ def stage_worker():
         write_batch_status(store, batches_folder, index, total, "TRANSCRIBING",
                            f"Batch {index}/{total} — Whisper transcription", start, end)
         hint = language_hint(metadata.get("language_hint", ""))
-        data = whisper_json(wav, WORK / f"transcript_{index:03d}", hint)
-        local = ai_mod.segments_from_whisper(data)
-        if not local:
-            raise MomError("MOM-019", f"Batch {index} produced no transcript segments.")
+        data, local, quality = transcribe_batch(wav, index, hint)
+        batch_model = env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M")
+        if quality["status"] != "ok":
+            write_empty_batch(store, batch_folder, index, start, end, quality, batch_model)
+            write_batch_status(store, batches_folder, index, total, "COMPLETED",
+                               f"Batch {index}/{total} complete - no usable speech ({quality['status']})", start, end,
+                               quality_status=quality["status"], quality_reason=sanitize(quality.get("reason", ""))[:300])
+            source.unlink(missing_ok=True)
+            wav.unlink(missing_ok=True)
+            return
         original = _shift_segments(local, start)
         data = _shift_whisper_data(data, start)
         data["_batch"] = {"index": index, "start_seconds": start, "end_seconds": end}
+        data["_quality"] = quality
         store.upsert_text(batch_folder, "Original Transcript.txt",
                           "\n".join(ai_mod.seg_line(s) for s in original) + "\n")
         store.upsert_text(batch_folder, "Transcript.json", dump(data), JSON_MIME)
 
         write_batch_status(store, batches_folder, index, total, "ANALYZING",
                            f"Batch {index}/{total} — AI evidence + translation", start, end)
-        batch_model = env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M")
         json_fn, text_fn = ai_mod.make_ollama_fns(batch_model)
         ai = ai_mod.run_understanding(
             metadata, original, [], json_fn, text_fn,
@@ -425,10 +507,13 @@ def stage_worker():
                            f"Batch {index}/{total} complete", start, end)
         source.unlink(missing_ok=True)
         wav.unlink(missing_ok=True)
-    except Exception:
+    except Exception as exc:
+        code = exc.code if isinstance(exc, MomError) else "MOM-021"
+        message = exc.message if isinstance(exc, MomError) else f"{type(exc).__name__}: {exc}"
         try:
             write_batch_status(store, batches_folder, index, total, "FAILED",
-                               f"Batch {index}/{total} failed", start, end)
+                               f"Batch {index}/{total} failed", start, end,
+                               error_code=code, error_message=sanitize(message))
         except Exception:
             pass
         raise
@@ -437,6 +522,7 @@ def stage_worker():
 def stage_finalize():
     store = DriveStore.from_env()
     meeting = env("MEETING_FOLDER_ID")
+    WORK.mkdir(parents=True, exist_ok=True)
     total_raw = env("BATCH_TOTAL", "")
     duration_raw = env("MEETING_DURATION_SECONDS", "")
     if not meeting or not total_raw or not duration_raw:
@@ -466,6 +552,7 @@ def stage_finalize():
     batch_folders = {f["name"]: f["id"] for f in store.list_children(batches_folder, folders=True)}
     batch_results, all_original, all_translation = [], [], []
     missing = []
+    window_quality = {}
     for index in range(1, total + 1):
         start = (index - 1) * BATCH_SECONDS
         end = min(start + BATCH_SECONDS, duration)
@@ -482,12 +569,20 @@ def stage_finalize():
             continue
         batch_results.append(json.loads(store.read_bytes(ai_meta["id"]).decode("utf-8")))
         tdata = json.loads(store.read_bytes(tr_meta["id"]).decode("utf-8"))
+        window_quality[index] = (tdata.get("_quality") or {}).get("status") or "ok"
         edata = json.loads(store.read_bytes(en_meta["id"]).decode("utf-8"))
         all_original.extend(ai_mod.segments_from_whisper(tdata))
         all_translation.extend(ai_mod.segments_from_whisper(edata))
 
     if missing:
         raise MomError("MOM-019", "Parallel batches incomplete: " + ", ".join(map(str, missing)))
+
+    silent = sorted(i for i, q in window_quality.items() if q == "silent")
+    rejected = sorted(i for i, q in window_quality.items() if q == "rejected")
+    if len(silent) + len(rejected) == total:
+        raise MomError("MOM-019", f"No usable speech was found in any of the {total} ten-minute window(s). Check that the recording contains clear speech.")
+    if rejected and len(rejected) * 2 >= total:
+        raise MomError("MOM-019", f"{len(rejected)} of {total} ten-minute windows failed the transcript quality check (windows {', '.join(map(str, rejected))}); too much of the meeting would be missing.")
 
     all_original.sort(key=lambda x: x["start"])
     all_translation.sort(key=lambda x: x["start"])
@@ -540,6 +635,7 @@ def stage_finalize():
     }
     final_ai["batch_manifest"] = {
         "total": total, "batch_seconds": BATCH_SECONDS, "duration_seconds": duration,
+        "silent_windows": silent, "rejected_windows": rejected,
         "parallel": True, "batch_ai_model": env("AI_BATCH_MODEL", "qwen3:1.7b-q4_K_M"),
         "final_ai_model": final_model, **github_run_fields()
     }
@@ -582,6 +678,7 @@ def stage_finalize():
         "ai_model": final_model, "outputs": {"mom_docx": docx_name,
         "executive_summary": True, "complete_conversation_summary": True},
         "validation": report, "parallel_batches": total,
+        "silent_windows": silent, "rejected_windows": rejected,
         "attendance_present_count": attendance.get("present_count", 0) if attendance else 0,
         "continuity_used": bool(previous)
     }), JSON_MIME)
@@ -596,17 +693,50 @@ def stage_finalize():
     store.upsert_text(meeting, "PROCESSING_STATUS.json", dump(status), JSON_MIME)
 
 
+def report_root_failure(code, message):
+    """Record prepare/finalize failures in the meeting's authoritative status."""
+    try:
+        store = DriveStore.from_env()
+        meeting = env("MEETING_FOLDER_ID")
+        if not meeting:
+            return
+        reporter = StatusReporter(store, meeting, env("MEETING_ID"), WORK / "status.json", "batch_" + env("MODE_NAME", "run"))
+        try:
+            existing = store.read_json(meeting, "PROCESSING_STATUS.json")
+            for key in ("progress_percent", "batch_total", "duration_seconds"):
+                if key in existing:
+                    reporter.data[key] = existing[key]
+        except Exception:
+            pass
+        reporter.data.update(github_run_fields())
+        reporter.fail(code, message)
+    except Exception as exc:
+        log(f"WARNING: could not record failure status: {sanitize(exc)}")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["prepare", "worker", "finalize"], required=True)
     args = parser.parse_args()
-    if args.mode == "prepare":
-        stage_prepare()
-    elif args.mode == "worker":
-        stage_worker()
-    else:
-        stage_finalize()
+    os.environ["MODE_NAME"] = args.mode
+    try:
+        if args.mode == "prepare":
+            stage_prepare()
+        elif args.mode == "worker":
+            stage_worker()
+        else:
+            stage_finalize()
+    except Exception as exc:
+        code = exc.code if isinstance(exc, MomError) else "MOM-021"
+        message = exc.message if isinstance(exc, MomError) else f"{type(exc).__name__}: {exc}"
+        log(f"PROCESSING FAILED [{code}] {sanitize(message)}")
+        if not isinstance(exc, MomError):
+            import traceback
+            traceback.print_exc()
+        if args.mode != "worker":
+            report_root_failure(code, message)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
