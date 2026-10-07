@@ -19,6 +19,7 @@ ERROR_NAMES = {
     # Extensions to the spec table (MOM-016..018 are reserved for the offline system).
     "MOM-019": "Transcript quality failure",
     "MOM-020": "Audio health failure",
+    "MOM-021": "Unexpected processor failure",
 }
 
 STAGE_DEFAULT_CODE = {
