@@ -1,7 +1,7 @@
 from pathlib import Path
 import py_compile
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_production_python_compiles():
