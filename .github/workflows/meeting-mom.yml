@@ -120,6 +120,8 @@ jobs:
       BATCH_INDEX: ${{ matrix.batch_index }}
       BATCH_TOTAL: ${{ needs.prepare.outputs.batch_total }}
       MEETING_DURATION_SECONDS: ${{ needs.prepare.outputs.duration_seconds }}
+      # "resume" reuses completed Drive batches; anything else recomputes (sent by the Apps Script gateway).
+      PROCESSING_MODE: ${{ github.event.client_payload.processing_mode || 'fresh' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -202,7 +204,7 @@ jobs:
       AUDIO_FOLDER_ID: ${{ github.event.client_payload.audio_folder_id }}
       MEETING_FOLDER_ID: ${{ github.event.client_payload.meeting_folder_id }}
       AUDIO_FILE_ID: ${{ github.event.client_payload.audio_file_id }}
-      FAILED_ERROR_CODE: MOM-019
+      FAILED_ERROR_CODE: MOM-021
       FAILED_STEP: ${{ needs.prepare.result != 'success' && 'prepare' || needs.parallel-batches.result != 'success' && 'parallel-batches' || 'finalize' }}
     steps:
       - uses: actions/checkout@v4
