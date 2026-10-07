@@ -1764,8 +1764,38 @@ async function findAndMonitorLatestRun(item,requestStarted) {
       return;
     }
 
+    // The gateway request is sent with mode:"no-cors", so the browser can never read the gateway's reply.
+    // The only proof the gateway worked is CONTROL_STATUS.json in the meeting folder. Without it, say so
+    // honestly and stop after a bounded wait instead of showing 5% forever.
+    const elapsedMs = Date.now() - Date.parse(requestStarted || "");
+    if (!control && Number.isFinite(elapsedMs) && elapsedMs > 120000) {
+      updateBackgroundProcessing(item.id,{
+        stage:"failed",
+        percent:5,
+        statusText:"The Google gateway did not confirm the request within 2 minutes. Nothing was started on GitHub.",
+        errorCode:"GATEWAY_NO_CONFIRMATION",
+        errorMessage:"Open " + CONFIG.gateway + "?action=health in a browser. A working Control Tower shows success:true and status:OK. " +
+          "If it shows ok:true with version 1.1, the OLD gateway is deployed (redeploy google-apps-script/Code.gs). " +
+          "Also confirm the GITHUB_TOKEN script property exists, then press RETRY PROCESSING."
+      });
+      return;
+    }
+    if (control && !controlledRunId && Number.isFinite(elapsedMs) && elapsedMs > 300000) {
+      updateBackgroundProcessing(item.id,{
+        stage:"failed",
+        percent:5,
+        statusText:"The gateway accepted the request, but no GitHub Actions run appeared within 5 minutes.",
+        errorCode:"GITHUB_RUN_NOT_FOUND",
+        errorMessage:"Check GitHub: Actions are enabled, .github/workflows/meeting-mom.yml is on the main branch, " +
+          "and the GITHUB_TOKEN property can create repository dispatches. Then press RETRY PROCESSING."
+      });
+      return;
+    }
+
     updateBackgroundProcessing(item.id,{
-      statusText:"Gateway accepted — waiting for verified GitHub Actions run"
+      statusText: control
+        ? "Gateway accepted — waiting for verified GitHub Actions run"
+        : "Waiting for the Google gateway to confirm the request…"
     });
     setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000);
   } catch(e) {
