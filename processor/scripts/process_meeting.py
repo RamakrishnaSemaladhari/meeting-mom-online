@@ -247,6 +247,12 @@ def stage_init(ctx):
         "GitHub Actions Run #" + (env("GITHUB_RUN_ID") or "unknown") + " started; validating meeting payload.",
         7
     )
+    # Cheap checks first: credential and write-permission failures must surface before audio work.
+    if hasattr(ctx.store, "identity"):
+        log(f"Drive access: signed in as {ctx.store.identity()}")
+    if hasattr(ctx.store, "write_probe"):
+        ctx.store.write_probe(ctx.meeting_folder, (env("GITHUB_RUN_ID") or "run")[:40])
+        log("Drive write check: PASS (results can be saved to the meeting folder)")
 
 
 def stage_whisper(ctx):
@@ -378,11 +384,54 @@ def stage_mom(ctx):
     st.update("COMPLETED", "Results are ready in Google Drive", 100)
 
 
+def _drive_json(store, folder, name):
+    try:
+        meta = store.find_one(folder, name)
+        return json.loads(store.read_bytes(meta["id"]).decode("utf-8")) if meta else None
+    except Exception:
+        return None
+
+
+def first_failed_batch(store, meeting_folder):
+    try:
+        folders = {f["name"]: f["id"] for f in store.list_children(meeting_folder, folders=True)}
+        batches = folders.get("BATCHES")
+        if not batches:
+            return None
+        failed = []
+        for f in store.list_children(batches, folders=False):
+            if f["name"].startswith("BATCH_STATUS_") and f["name"].endswith(".json"):
+                data = json.loads(store.read_bytes(f["id"]).decode("utf-8"))
+                if str(data.get("status", "")).upper() == "FAILED":
+                    failed.append(data)
+        failed.sort(key=lambda d: int(d.get("batch_index") or 0))
+        return failed[0] if failed else None
+    except Exception:
+        return None
+
+
 def stage_fail(ctx):
+    """Read authoritative failure state from Drive on the fresh failure runner."""
     if ctx.status.data.get("status") in ("FAILED", "COMPLETED"):
         return
-    ctx.status.fail(env("FAILED_ERROR_CODE", "MOM-003"),
-                    f"Workflow step failed before the processor could report: {env('FAILED_STEP', 'unknown')}")
+    existing = _drive_json(ctx.store, ctx.meeting_folder, "PROCESSING_STATUS.json") or {}
+    if existing.get("status") == "COMPLETED":
+        return
+    generic = ("MOM-021", "MOM-003", "")
+    if existing.get("status") == "FAILED" and (existing.get("error_code") or "") not in generic:
+        return
+    for key in ("batch_total", "duration_seconds"):
+        if key in existing:
+            ctx.status.data[key] = existing[key]
+    batch = first_failed_batch(ctx.store, ctx.meeting_folder)
+    if batch and (batch.get("error_code") or batch.get("error_message")):
+        total = batch.get("batch_total") or existing.get("batch_total") or "?"
+        ctx.status.data["failed_batch"] = batch.get("batch_index")
+        ctx.status.fail(batch.get("error_code") or "MOM-021",
+                        f"Batch {batch.get('batch_index')}/{total} failed: {batch.get('error_message') or batch.get('message', '')}")
+        return
+    ctx.status.fail(env("FAILED_ERROR_CODE", "MOM-021") or "MOM-021",
+                    f"Workflow step failed before the processor could report: {env('FAILED_STEP', 'unknown')}. Open the GitHub run for the exact log.")
 
 
 from pipeline.batch_processor import stage_batch as _stage_batch
