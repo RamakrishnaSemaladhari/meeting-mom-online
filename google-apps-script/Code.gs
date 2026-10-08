@@ -97,13 +97,14 @@ const CONFIG = {
 /*
  * Bump GATEWAY_VERSION whenever this file changes, so /exec?action=health proves which code is deployed.
  */
-const GATEWAY_VERSION = 'control-tower-2026-10-08';
+const GATEWAY_VERSION = 'control-tower-2026-10-08-registry-test-1';
 
 const GATEWAY_CAPABILITIES = [
   'start_processing',
   'control_status',
   'processing_mode',
-  'dispatch_failure_reporting'
+  'dispatch_failure_reporting',
+  'registry_lifecycle_test'
 ];
 
 
