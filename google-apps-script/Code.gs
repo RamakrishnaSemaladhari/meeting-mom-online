@@ -5676,6 +5676,333 @@ function TEST_09_PRODUCTION_STATUS() {
 }
 
 
+/**
+ * TEST 10 / 11
+ *
+ * Safe registry-only simulation.
+ *
+ * IMPORTANT:
+ * - Does NOT call GitHub.
+ * - Does NOT dispatch a meeting-ready event.
+ * - Does NOT require a real audio file.
+ * - Uses a clearly marked SIM-* meeting ID.
+ *
+ * TEST_10 creates a simulated PROCESSING row using a historical
+ * meeting date so the registry lifecycle can be inspected manually.
+ *
+ * TEST_11 updates the newest SIM-* row to COMPLETED and calculates
+ * Processing Time, allowing the update lifecycle to be inspected.
+ */
+function TEST_10_SIMULATE_REGISTRY_CREATE() {
+
+  const sheet = getRegistrySheet_();
+  ensureHeaders_(sheet);
+
+  const stamp =
+    Utilities.formatDate(
+      new Date(),
+      CONFIG.TIMEZONE,
+      'yyyyMMdd-HHmmss'
+    );
+
+  const meetingId =
+    'SIM-' + stamp;
+
+  const simulatedDate = '2026-10-01';
+  const simulatedStart = '10:00:00';
+
+  const now = new Date();
+
+  const row = [
+    meetingId,
+    'SIMULATION - REGISTRY LIFECYCLE TEST',
+    'SYSTEM TEST',
+    'ONLINE',
+    'TEST',
+    simulatedDate,
+    simulatedStart,
+    '',
+    2,
+    'SIMULATION ONLY',
+    'Manual registry lifecycle validation',
+    'Test Participant',
+    'PROCESSING',
+    now,
+    '',
+    '',
+    'SIMULATED_AUDIO_FILE',
+    'SIMULATED_MEETING_FOLDER',
+    'SIMULATED_AUDIO_FOLDER',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    now,
+    now
+  ];
+
+  sheet.appendRow(row);
+
+  const rowNumber = sheet.getLastRow();
+
+  SpreadsheetApp.flush();
+
+  return DEBUG_log_(
+    'TEST 10 - SIMULATED REGISTRY CREATE',
+    {
+      success: true,
+      safe_simulation: true,
+      github_dispatched: false,
+      meeting_id: meetingId,
+      row: rowNumber,
+      simulated_meeting_date: simulatedDate,
+      status: 'PROCESSING',
+      processing_start: formatDateTime_(now),
+      message:
+        'A clearly marked SIM-* registry row was created. No GitHub dispatch was performed. Check the Sheet manually, then run TEST_11_SIMULATE_REGISTRY_COMPLETE.'
+    }
+  );
+}
+
+
+/**
+ * Complete the newest SIM-* registry row.
+ *
+ * This updates the existing row only; it does not create another row
+ * and does not call GitHub.
+ */
+function TEST_11_SIMULATE_REGISTRY_COMPLETE() {
+
+  const sheet = getRegistrySheet_();
+  ensureHeaders_(sheet);
+
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    return DEBUG_log_(
+      'TEST 11 - SIMULATED REGISTRY COMPLETE',
+      {
+        success: false,
+        message: 'No registry rows exist.'
+      }
+    );
+  }
+
+  const values =
+    sheet
+      .getRange(
+        2,
+        1,
+        lastRow - 1,
+        HEADERS.length
+      )
+      .getValues();
+
+  let rowNumber = 0;
+
+  for (let i = values.length - 1; i >= 0; i--) {
+
+    const meetingId =
+      clean_(values[i][0]);
+
+    if (
+      meetingId &&
+      meetingId.indexOf('SIM-') === 0
+    ) {
+      rowNumber = i + 2;
+      break;
+    }
+  }
+
+  if (rowNumber < 2) {
+    return DEBUG_log_(
+      'TEST 11 - SIMULATED REGISTRY COMPLETE',
+      {
+        success: false,
+        message:
+          'No SIM-* test meeting was found. Run TEST_10_SIMULATE_REGISTRY_CREATE first.'
+      }
+    );
+  }
+
+  const rowBefore =
+    getRowObject_(
+      sheet,
+      rowNumber
+    );
+
+  const startValue =
+    rowBefore['Processing Start'];
+
+  let processingSeconds = 0;
+
+  if (startValue instanceof Date) {
+    processingSeconds =
+      Math.max(
+        0,
+        Math.round(
+          (
+            new Date().getTime() -
+            startValue.getTime()
+          ) / 1000
+        )
+      );
+  }
+
+  const processingTime =
+    formatDuration_(processingSeconds);
+
+  const end = new Date();
+
+  setCellByHeader_(
+    sheet,
+    rowNumber,
+    'Status',
+    'COMPLETED'
+  );
+
+  setCellByHeader_(
+    sheet,
+    rowNumber,
+    'Processing End',
+    end
+  );
+
+  setCellByHeader_(
+    sheet,
+    rowNumber,
+    'Processing Time',
+    processingTime
+  );
+
+  setCellByHeader_(
+    sheet,
+    rowNumber,
+    'Updated At',
+    end
+  );
+
+  SpreadsheetApp.flush();
+
+  const rowAfter =
+    getRowObject_(
+      sheet,
+      rowNumber
+    );
+
+  return DEBUG_log_(
+    'TEST 11 - SIMULATED REGISTRY COMPLETE',
+    {
+      success: true,
+      safe_simulation: true,
+      github_dispatched: false,
+      meeting_id:
+        clean_(rowAfter['Meeting ID']),
+      row: rowNumber,
+      status:
+        clean_(rowAfter['Status']),
+      meeting_date:
+        clean_(rowAfter['Meeting Date']),
+      processing_start:
+        formatDateTimeValue_(rowAfter['Processing Start']),
+      processing_end:
+        formatDateTimeValue_(rowAfter['Processing End']),
+      processing_time:
+        clean_(rowAfter['Processing Time']),
+      updated_at:
+        formatDateTimeValue_(rowAfter['Updated At']),
+      message:
+        'The existing SIM-* row was updated to COMPLETED. No GitHub dispatch was performed.'
+    }
+  );
+}
+
+
+/**
+ * TEST 12
+ *
+ * Remove only the newest SIM-* test row.
+ * This never deletes a real meeting row.
+ */
+function TEST_12_DELETE_SIMULATION() {
+
+  const sheet = getRegistrySheet_();
+  ensureHeaders_(sheet);
+
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    return DEBUG_log_(
+      'TEST 12 - DELETE SIMULATION',
+      {
+        success: false,
+        message: 'No registry rows exist.'
+      }
+    );
+  }
+
+  const values =
+    sheet
+      .getRange(
+        2,
+        1,
+        lastRow - 1,
+        HEADERS.length
+      )
+      .getValues();
+
+  let rowNumber = 0;
+  let meetingId = '';
+
+  for (let i = values.length - 1; i >= 0; i--) {
+
+    const id =
+      clean_(values[i][0]);
+
+    if (
+      id &&
+      id.indexOf('SIM-') === 0
+    ) {
+      rowNumber = i + 2;
+      meetingId = id;
+      break;
+    }
+  }
+
+  if (rowNumber < 2) {
+    return DEBUG_log_(
+      'TEST 12 - DELETE SIMULATION',
+      {
+        success: false,
+        message: 'No SIM-* test row found.'
+      }
+    );
+  }
+
+  sheet.deleteRow(rowNumber);
+  SpreadsheetApp.flush();
+
+  return DEBUG_log_(
+    'TEST 12 - DELETE SIMULATION',
+    {
+      success: true,
+      deleted_simulation_only: true,
+      meeting_id: meetingId,
+      row: rowNumber,
+      message:
+        'Only the newest SIM-* diagnostic row was deleted.'
+    }
+  );
+}
+
+
 /************************************************************
  * LEGACY SAFE TESTS
  ************************************************************/
