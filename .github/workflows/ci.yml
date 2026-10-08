@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - "processor/**"
+      - "google-apps-script/**"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "processor/**"
+      - "google-apps-script/**"
       - ".github/workflows/ci.yml"
 
 permissions:
