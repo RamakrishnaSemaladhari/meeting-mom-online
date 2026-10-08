@@ -1,3 +1,9 @@
+/************************************************************
+ * DEPRECATED - DO NOT DEPLOY THIS FILE.
+ * The canonical gateway is google-apps-script/Code.gs.
+ * See docs/DEPLOYMENT_CHECKLIST.md.
+ ************************************************************/
+
 const ROOT_FOLDER_ID = '1kfwyuKxXdywPy9jhZjghFI4yGJEwh-Yl';
 
 const FOLDER_NAMES = [
