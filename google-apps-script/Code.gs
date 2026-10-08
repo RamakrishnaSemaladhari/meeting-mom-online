@@ -94,6 +94,19 @@ const CONFIG = {
 };
 
 
+/*
+ * Bump GATEWAY_VERSION whenever this file changes, so /exec?action=health proves which code is deployed.
+ */
+const GATEWAY_VERSION = 'control-tower-2026-10-08';
+
+const GATEWAY_CAPABILITIES = [
+  'start_processing',
+  'control_status',
+  'processing_mode',
+  'dispatch_failure_reporting'
+];
+
+
 /************************************************************
  * REGISTRY HEADERS
  *
@@ -206,6 +219,14 @@ function doGet(e) {
 
           status:
             'OK',
+
+          // Older deployments answer health with the same shape but WITHOUT these two fields.
+          // If "version" is missing from /exec?action=health, the old script is still deployed.
+          version:
+            GATEWAY_VERSION,
+
+          capabilities:
+            GATEWAY_CAPABILITIES,
 
           timestamp:
             now_()
@@ -1068,6 +1089,29 @@ function startProcessing_(data) {
       'Updated At',
       new Date()
     );
+
+
+    // The web page sends this request with mode "no-cors" and cannot read the reply above,
+    // so publish the failure where it CAN read it: CONTROL_STATUS.json in the meeting folder.
+    try {
+      writeControlStatus_(meetingFolderId, {
+        meeting_id: meetingId,
+        control_status: 'FAILED',
+        github: { run_id: '', run_number: '', status: 'not_started', conclusion: '', run_url: '', created_at: '' },
+        processor: {
+          status: 'FAILED',
+          stage: 'DISPATCH_FAILED',
+          progress_percent: 5,
+          message: 'GitHub processing could not be started: ' + (githubResult.message || 'dispatch failed'),
+          error_code: 'GITHUB_DISPATCH',
+          error_message: githubResult.message || 'GitHub dispatch failed'
+        },
+        gateway_version: GATEWAY_VERSION,
+        updated_at: now_()
+      });
+    } catch (controlErr) {
+      // never let status reporting hide the original failure
+    }
 
 
     return {
@@ -2623,10 +2667,48 @@ function dispatchToGitHub_(
       'GITHUB_DISPATCH_FAILED',
 
     message:
-      text ||
-      'GitHub dispatch failed'
+      describeGitHubDispatchFailure_(
+        code,
+        text
+      )
 
   };
+}
+
+function describeGitHubDispatchFailure_(
+  code,
+  text
+) {
+
+  const detail =
+    String(
+      text ||
+      ''
+    )
+    .substring(
+      0,
+      300
+    );
+
+  if (code === 401) {
+    return 'GitHub rejected the token (401). The GITHUB_TOKEN script property is invalid or expired. ' + detail;
+  }
+
+  if (code === 403) {
+    return 'GitHub refused the request (403). The token needs Contents: Read and write on the repository ' +
+      '(classic token: repo scope). ' + detail;
+  }
+
+  if (code === 404) {
+    return 'GitHub returned 404. The token cannot see ' + CONFIG.GITHUB_REPO +
+      ' (wrong repository access or wrong owner/name). ' + detail;
+  }
+
+  if (code === 422) {
+    return 'GitHub rejected the dispatch payload (422). ' + detail;
+  }
+
+  return 'GitHub dispatch failed (HTTP ' + code + '). ' + detail;
 }
 
 
