@@ -34,3 +34,5 @@ jobs:
           cache-dependency-path: processor/requirements.txt
       - run: pip install -r processor/requirements.txt
       - run: python -m unittest discover -s processor/tests -p 'test_*.py' -v
+      - name: Apps Script gateway tests (real Code.gs in a mocked Google runtime)
+        run: node --test google-apps-script/tests/gateway.test.js
