@@ -5911,13 +5911,13 @@ function TEST_11_SIMULATE_REGISTRY_COMPLETE() {
       meeting_date:
         clean_(rowAfter['Meeting Date']),
       processing_start:
-        formatDateTimeValue_(rowAfter['Processing Start']),
+        formatApiDateTime_(rowAfter['Processing Start']),
       processing_end:
-        formatDateTimeValue_(rowAfter['Processing End']),
+        formatApiDateTime_(rowAfter['Processing End']),
       processing_time:
         clean_(rowAfter['Processing Time']),
       updated_at:
-        formatDateTimeValue_(rowAfter['Updated At']),
+        formatApiDateTime_(rowAfter['Updated At']),
       message:
         'The existing SIM-* row was updated to COMPLETED. No GitHub dispatch was performed.'
     }
