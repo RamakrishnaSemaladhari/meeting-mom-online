@@ -13,7 +13,7 @@ function makeEnv(opts = {}) {
     appendRow(r) { rows.push(r.slice()); log.sheetWrites++; },
     getRange(r, c, nr = 1, nc = 1) {
       return {
-        getValues: () => Array.from({length: nr}, (_, i) => Array.from({length: nc}, (_, j) => (rows[r - 1 + i] || [])[c - 1 + j] ?? ''),
+        getValues: () => Array.from({length: nr}, (_, i) => Array.from({length: nc}, (_, j) => (rows[r - 1 + i] || [])[c - 1 + j] ?? '')),
         getValue: () => (rows[r - 1] || [])[c - 1] ?? '',
         setValue(v) { (rows[r - 1] = rows[r - 1] || [])[c - 1] = v; log.sheetWrites++; return this; },
         setValues(v) { v.forEach((row, i) => row.forEach((x, j) => { (rows[r - 1 + i] = rows[r - 1 + i] || [])[c - 1 + j] = x; })); return this; },
