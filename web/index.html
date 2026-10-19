@@ -71,6 +71,24 @@
 .source-badge{display:inline-block;margin-top:8px;padding:4px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:11px;font-weight:700}
 .type-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.type-card{margin-top:14px;padding:14px;border:1px solid #dbe3ee;border-radius:16px;background:#f8fafc}.type-card h3{margin:0 0 4px;font-size:16px}.type-card .hint{margin-bottom:4px}.type-card select{width:100%;padding:13px;border:1px solid #d1d5db;border-radius:12px;font-size:16px;background:#fff}.type-conditional{display:none;margin-top:10px}.type-conditional.visible{display:block}
 
+  
+    @media (max-width: 520px) {
+      main { padding: 10px 10px 28px; }
+      .card { padding: 16px; border-radius: 17px; margin-top: 12px; }
+      h1 { font-size: 26px; }
+      .grid, .type-grid { grid-template-columns: 1fr; gap: 6px; }
+      .row, .voice-wrap { min-width: 0; }
+      .voice-wrap input, .voice-wrap textarea { min-width: 0; }
+      .voice-btn { min-width: 44px; padding: 10px 8px; }
+      #timer { font-size: 40px; }
+      .continuity-source-tabs button { font-size: 11px; padding: 9px 3px; }
+      .verified-grid, .results-actions, .app-actions, .continuity-actions { grid-template-columns: 1fr; }
+      .processing-head { align-items: flex-start; }
+      .processing-percent { white-space: nowrap; }
+      button { min-height: 46px; }
+      input, textarea, select { max-width: 100%; }
+    }
+
   </style>
 </head>
 <body>
@@ -373,7 +391,7 @@
   </div>
 </main>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="app.js?v=35"></script>
+<script src="app.js?v=36"></script>
 <script src="batch.js?v=2"></script>
 </body>
 </html>
