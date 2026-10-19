@@ -1799,6 +1799,19 @@ async function findAndMonitorLatestRun(item,requestStarted) {
     });
     setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},7000);
   } catch(e) {
+    // A status-read failure must not leave the UI displaying 5% forever.
+    const elapsedMs = Date.now() - Date.parse(requestStarted || "");
+    if (Number.isFinite(elapsedMs) && elapsedMs > 120000) {
+      updateBackgroundProcessing(item.id,{
+        stage:"failed",
+        percent:5,
+        statusText:"Cannot verify processing status from Google Drive after 2 minutes.",
+        errorCode:"CONTROL_STATUS_READ_FAILED",
+        errorMessage:String(e && e.message ? e.message : e) +
+          " — Check that the Google Drive status file is accessible and the deployed Apps Script gateway is current. Audio has not been re-uploaded."
+      });
+      return;
+    }
     setTimeout(function(){findAndMonitorLatestRun(item,requestStarted);},15000);
   }
 }
